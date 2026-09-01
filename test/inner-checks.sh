@@ -212,29 +212,28 @@ if [ -x /usr/bin/apt-get ]; then
   # 源对境外出口偶发卡死（返回 200、Content-Length 正确、body 零字节），单次 60 秒
   # 足以被打穿：实测同一版本同一架构的 devel 通过而 base 报 NOUPDATE，两者的
   # sources.list 完全一样——那是网络抖动，不是镜像缺陷。
-  _upd=no; _uerr=""
-  for _i in 1 2 3; do
-    if T 60 /usr/bin/apt-get update -qq >/dev/null 2>/tmp/.aptupd.err; then _upd=yes; break; fi
-    # 留下失败原因。原先这里是 2>&1 >/dev/null，于是 NOUPDATE 只是一个结论、
-    # 没有任何线索：连不上、验签不过、缺 gpgv、源不完整，长得一模一样。
-    # 两轮 CI 里 v4 的 base 档各失败一次而 devel 都通过，靠猜排不出来。
+  # 不手写重试：出厂镜像自带 Acquire::Retries 3（见 lib/common.sh::adapt_container），
+  # apt 会自己重试，再包一层等于把同一个策略实现两遍。
+  # 但报错要留下：原先是 2>&1 >/dev/null，于是 NOUPDATE 只是一个结论、没有线索——
+  # 连不上、验签不过、缺 gpgv、源不完整，长得一模一样，两轮 CI 里靠猜排不出来。
+  _uerr=""
+  if T 180 /usr/bin/apt-get update -qq >/dev/null 2>/tmp/.aptupd.err; then
+    _upd=yes
+  else
+    _upd=no
     _uerr=$(tr '\n' ' ' < /tmp/.aptupd.err 2>/dev/null | tail -c 300)
-    sleep 5
-  done
-  [ "$_upd" = yes ] || kv apt_update_err "${_uerr:-无输出}"
+    kv apt_update_err "${_uerr:-无输出}"
+  fi
   if [ "$_upd" = yes ]; then
     # 安装同样在下载，同样会撞上源的偶发卡死，所以同样要重试并留下报错。
     # 上一轮只给 update 加了重试，于是失败从 NOUPDATE 变成 N(未装)——
     # 症状换了个名字，根因（网络抖动 + 单次尝试 + 报错被丢弃）一模一样。
     # 教训：这条检查里每一个网络操作都要有重试和错误留存，不能逐个补。
-    _ins=no; _ierr=""
-    for _j in 1 2 3; do
-      if DEBIAN_FRONTEND=noninteractive T 120 /usr/bin/apt-get install -y -qq \
-           --no-install-recommends nano >/dev/null 2>/tmp/.aptins.err; then _ins=yes; break; fi
-      _ierr=$(tr '\n' ' ' < /tmp/.aptins.err 2>/dev/null | tail -c 300)
-      sleep 5
-    done
-    [ "$_ins" = yes ] || kv apt_install_err "${_ierr:-无输出}"
+    # 同上：重试交给 apt 的 Acquire::Retries，这里只跑一次并留下报错。
+    if ! DEBIAN_FRONTEND=noninteractive T 240 /usr/bin/apt-get install -y -qq \
+         --no-install-recommends nano >/dev/null 2>/tmp/.aptins.err; then
+      kv apt_install_err "$(tr '\n' ' ' < /tmp/.aptins.err 2>/dev/null | tail -c 300)"
+    fi
     st=$(dpkg-query $A -W -f='${Status}' nano 2>/dev/null)
     if [ "$st" = "install ok installed" ]; then
       DEBIAN_FRONTEND=noninteractive T 60 /usr/bin/apt-get purge -y -qq nano >/dev/null 2>&1

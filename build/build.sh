@@ -252,27 +252,18 @@ if [ "$METHOD" = selfhost ]; then
   log "[$DID] 转 selfhost 两段式：$TIERS"
   DID=$DID ROOT=$ROOT BK=$BK ARCH=$ARCH "$BK/build/build-selfhost.sh" $TIERS
 else
-  # 档位级重试。源对境外出口偶发卡死：实测过「返回 200、Content-Length 正确、
-  # body 0 字节直到超时」，也见过 apt 报 Connection timed out。吞吐本身没问题
-  # （实测 1.45 MB/s），是间断性的，所以重试有效而换镜像没必要。
-  # apt 自己的 Acquire::Retries 只覆盖单次 update 内的重试，每个档位都要重跑一遍
-  # 完整的 update + download，所以还需要这一层。
+  # 只跑一次。重试是 CI 层的事——build-one.yml 用 nick-fields/retry 包住整个步骤。
+  # 脚本里再写一层会让「重试几次、等多久」散落在两处，而且本地调试时的行为与 CI 不同。
   for T in $TIERS; do
-    _ok=no
-    for _try in 1 2 3; do
-      case $METHOD in
-        mmdebstrap) build_mmdebstrap "$T" && _ok=yes ;;
-        slice)      build_slice "$T"      && _ok=yes ;;
-        debmedia)   build_debmedia "$T"   && _ok=yes ;;
-        rpmmedia)   build_rpmmedia "$T"   && _ok=yes ;;
-      esac
-      [ "$_ok" = yes ] && break
-      log "[$DID/$T] 第 $_try 次未成，30 秒后重试"
-      sleep 30
-    done
-    [ "$_ok" = yes ] || die "[$DID/$T] 三次尝试均失败"
+    case $METHOD in
+      mmdebstrap) build_mmdebstrap "$T" ;;
+      slice)      build_slice "$T" ;;
+      debmedia)   build_debmedia "$T" ;;
+      rpmmedia)   build_rpmmedia "$T" ;;
+    esac
   done
 fi
+
 
 # 出口断言：不允许「退出码 0 但没有产物」。selfhost 的产物由 docker import 直接
 # 落成镜像而非 tar，两种形态都算通过。

@@ -83,43 +83,35 @@ jobs:
             echo "${{ inputs.distro-id }} 无 REPACK_DEBS / STUB_PROVIDES，跳过本地源"
           fi
 
+      # 重试交给 nick-fields/retry，脚本本身只管跑一次。
+      # 源对境外出口偶发卡死（返回 200、Content-Length 正确、body 零字节；
+      # debootstrap 侧表现为 "Couldn't download packages"），是外部条件不是逻辑问题。
+      #
+      # 执行位置按 METHOD 分派：mmdebstrap 系必须在 builder 容器（Debian 13）里跑——
+      # 宿主 Ubuntu 的 apt 与 mmdebstrap 差了好几代，signed-by 行为不同。
+      # selfhost 在宿主跑，它自己 docker exec 进容器完成阶段 1。
       - name: 构建 ${{ inputs.tier }}
-        env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
-        run: |
-          set -eu
-          M=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' METHOD)
-          echo "METHOD=$M  TIER=${{ inputs.tier }}"
-
-          # 一次尝试。执行位置按 METHOD 分派：
-          #   mmdebstrap 系必须在 builder 容器（Debian 13）里跑——宿主 Ubuntu 22.04 的
-          #   apt 与 mmdebstrap 差了好几代，signed-by 行为不同。
-          #   selfhost 在宿主跑，它自己 docker exec 进容器完成阶段 1。
-          # 每个档位各自跑一遍 debootstrap（实测约 4 分钟），不跨 job 共用 stage：
-          # 三档本来并行，共用省的是 CPU 不是墙钟。
-          attempt() {
+        uses: nick-fields/retry@v4.0.0
+        env:
+          ARCH: ${{ inputs.arch }}
+          ROOT: ${{ github.workspace }}
+        with:
+          timeout_minutes: 60
+          max_attempts: 3
+          retry_wait_seconds: 30
+          shell: bash
+          command: |
+            set -eu
+            M=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' METHOD)
+            echo "METHOD=$M  TIER=${{ inputs.tier }}"
             if [ "$M" = selfhost ]; then
               sudo -E DID='${{ inputs.distro-id }}' \
                 buildkit/build/build-selfhost.sh '${{ inputs.tier }}'
             else
               docker exec -e http_proxy= -e https_proxy= dosb bash -c \
-                "umask 022; ROOT=/w BK=/w/buildkit ARCH=$ARCH /w/buildkit/build/build.sh '${{ inputs.distro-id }}' '${{ inputs.tier }}'" \
-              && sudo -E buildkit/build/import.sh '${{ inputs.distro-id }}' '${{ inputs.tier }}'
+                "umask 022; ROOT=/w BK=/w/buildkit ARCH=$ARCH /w/buildkit/build/build.sh '${{ inputs.distro-id }}' '${{ inputs.tier }}'"
+              sudo -E buildkit/build/import.sh '${{ inputs.distro-id }}' '${{ inputs.tier }}'
             fi
-          }
-
-          # 重试放在这里而不是脚本内部，是为了两条路径一视同仁。
-          # build.sh 里那层档位级重试只包住 mmdebstrap 分支，而 selfhost 在本 workflow
-          # 里是直接调 build-selfhost.sh、压根不经过 build.sh，于是它一直没有重试。
-          # debootstrap 也不认 apt 的 Acquire::Retries，只能从外面兜。
-          # 源对境外出口偶发卡死，实测形态包括「返回 200、Content-Length 正确、body 零字节」
-          # 和 debootstrap 的 "E: Couldn't download packages: libc-bin"。
-          ok=no
-          for try in 1 2 3; do
-            if attempt; then ok=yes; break; fi
-            echo "::warning::第 $try 次构建未成，30 秒后重试"
-            sleep 30
-          done
-          [ "$ok" = yes ] || { echo "::error::三次尝试均失败"; exit 1; }
 
       - name: 导出镜像
         env: { ROOT: "${{ github.workspace }}", ARCH: "${{ inputs.arch }}" }

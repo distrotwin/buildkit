@@ -11,27 +11,23 @@ KEYRING="${KEYRING:-$ROOT/keys/kylin-archive-keyring.gpg}"
 
 # 统一的取源函数：fetch_exact <url> <out> [重试次数]
 #
-# 用 --speed-limit/--speed-time 而不是靠 --max-time 卡时长。这个源对境外出口的
-# 故障形态是「返回 200、Content-Length 正确、body 一个字节都不来」，而 --max-time
-# 区分不了「慢但在进」和「卡死不动」：收紧它会砍掉本来能成的大文件（27 MB 的索引
-# 在 45 秒内需要 590 KB/s），放宽它会让一个 35 KB 的卡死连接白等三分钟。
+# 重试用 curl 自带的 --retry / --retry-all-errors，不手写循环——
+# 手写循环等于把「重试几次、等多久」的策略从工具里挪到我们的代码里再实现一遍。
+#
+# 卡死判定用 --speed-limit / --speed-time 而不是 --max-time。这个源的故障形态是
+# 「返回 200、Content-Length 正确、body 一个字节都不来」，而 --max-time 区分不了
+# 「慢但在进」和「卡死不动」：收紧它会砍掉本来能成的大文件（27 MB 的索引在 45 秒内
+# 需要 590 KB/s），放宽它会让一个 35 KB 的卡死连接白等三分钟。
 # --speed-limit 1024 --speed-time 30 的含义是「持续 30 秒低于 1 KB/s 就放弃」，
-# 1.45 MB/s 的正常传输不受影响，卡死的 30 秒内退出并重试。
+# 正常传输不受影响，卡死的 30 秒内退出并由 --retry 接手。
 #
 # 落地后必须校验字节非空：只看 curl 退出码会把「拿到空文件」当成拿到了。
 fetch_exact() {
-  local url=$1 out=$2 tries=${3:-5} i
-  for i in $(seq 1 "$tries"); do
-    rm -f "$out"
-    if curl -fsS --connect-timeout 20 --speed-limit 1024 --speed-time 30 \
-         --retry 2 --retry-delay 3 --retry-all-errors -o "$out" "$url" \
-       && [ -s "$out" ]; then
-      return 0
-    fi
-    log "取 $url 第 $i 次未成（落地 $(stat -c%s "$out" 2>/dev/null || echo 0) 字节）"
-    sleep 5
-  done
-  return 1
+  local url=$1 out=$2 tries=${3:-5}
+  rm -f "$out"
+  curl -fsS --connect-timeout 20 --speed-limit 1024 --speed-time 30 \
+       --retry "$tries" --retry-delay 3 --retry-all-errors -o "$out" "$url" \
+    && [ -s "$out" ]
 }
 
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }

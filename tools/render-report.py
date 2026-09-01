@@ -35,21 +35,36 @@ def main():
     tot_pass = sum(r.get("pass", 0) for r in rows)
     tot_fail = sum(r.get("fail", 0) for r in rows)
     tot_warn = sum(r.get("warn", 0) for r in rows)
+    tot_xfail = sum(r.get("xfail", 0) for r in rows)
+    tot_xpass = sum(r.get("xpass", 0) for r in rows)
     tot_all = sum(r.get("total", 0) for r in rows)
 
     L = ["# 镜像测试报告", ""]
     L.append(f"共 **{len(rows)}** 个镜像，检查 **{tot_all}** 项："
-             f"通过 **{tot_pass}**，失败 **{tot_fail}**，警告 **{tot_warn}**。")
-    L += ["", "| 版本 | 架构 | 档位 | 通过 | 失败 | 警告 | 结果 |", "|---|---|---|---|---|---|---|"]
+             f"通过 **{tot_pass}**，失败 **{tot_fail}**，警告 **{tot_warn}**，"
+             f"期望失败 **{tot_xfail}**，意外通过 **{tot_xpass}**。")
+    L += ["",
+          "期望失败（XFAIL）是各镜像 conf 里声明的已知例外，不计为失败。"
+          "意外通过指列在 XFAIL 里却通过了的项——它不判失败，但说明那条豁免可以收回，"
+          "留着会掩盖以后真正的回归。",
+          "", "| 版本 | 架构 | 档位 | 通过 | 失败 | 警告 | 期望失败 | 意外通过 | 结果 |",
+          "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         ok = "✅" if r.get("fail", 0) == 0 else "❌"
         L.append(f"| {r.get('distro','?')} | {r.get('arch','?')} | {r.get('tiers','?')} | "
-                 f"{r.get('pass',0)} | {r.get('fail',0)} | {r.get('warn',0)} | {ok} |")
+                 f"{r.get('pass',0)} | {r.get('fail',0)} | {r.get('warn',0)} | "
+                 f"{r.get('xfail',0)} | {r.get('xpass',0)} | {ok} |")
 
     probs = [(r, p) for r in rows for p in r.get("problems", []) if p]
     if probs:
-        L += ["", "## 未通过的检查", ""]
+        L += ["", "## 未通过的检查（构成失败）", ""]
         for r, p in probs:
+            L.append(f"- `{r.get('distro')}/{r.get('arch')}/{r.get('tiers')}` {p}")
+
+    xn = [(r, p) for r in rows for p in r.get("xnotes", []) if p]
+    if xn:
+        L += ["", "## 期望失败与意外通过（不构成失败）", ""]
+        for r, p in xn:
             L.append(f"- `{r.get('distro')}/{r.get('arch')}/{r.get('tiers')}` {p}")
 
     exit_code = 0

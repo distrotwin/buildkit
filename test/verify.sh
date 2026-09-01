@@ -15,7 +15,18 @@ declare -a PROBLEMS=()
 
 check(){ # name expect actual [warn]
   local n=$1 e=$2 a=$3 lvl=${4:-fail}
-  if [ "$a" = "$e" ]; then PASS=$((PASS+1)); return 0; fi
+  if [ "$a" = "$e" ]; then
+    if is_xfail "$n"; then
+      XPASS_HITS=$((XPASS_HITS+1))
+      XNOTES+=("  ⚑ $IMG $n 列在 XFAIL 里却通过了（实际 $a）—— 该例外可以收回")
+    fi
+    PASS=$((PASS+1)); return 0
+  fi
+  if is_xfail "$n"; then
+    XFAIL_HITS=$((XFAIL_HITS+1))
+    XNOTES+=("  ○ $IMG $n: 期望 $e 实际 $a （XFAIL，已知且预期）")
+    return 1
+  fi
   if [ "$lvl" = warn ]; then WARN=$((WARN+1)); PROBLEMS+=("  ⚠ $IMG $n: 期望 $e 实际 $a"); else
     FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $n: 期望 $e 实际 $a"); fi
   return 1
@@ -25,8 +36,48 @@ check(){ # name expect actual [warn]
 # ⚠️ 这两个函数一开始我忘了定义就直接用，结果 `fail: 未找到命令` ——
 # 成功分支和失败分支都是命令未找到，既不计通过也不计失败，四个检查全程空转。
 # 这就是本项目反复出现的那类"假通过"，所以变异测试是必需的而不是锦上添花。
-pass(){ PASS=$((PASS+1)); }
-fail(){ FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $*"); }
+# ── 期望失败（xfail）────────────────────────────────────────────────────────────
+# 有些检查在某些被试上注定红，而且那不是缺陷：银河麒麟 V4 是 Ubuntu 16.04 血脉，
+# 它带的 gnupg 会装一个链接 libldap 的 gpgkeys_ldap，而我们不装 Recommends，
+# 于是 ldd 报缺库——真实的 V4 装机同样如此，镜像是忠实的。
+#
+# 这类项写进 conf 的 XFAIL（或按档位的 XFAIL_MICRO / XFAIL_BASE / XFAIL_DEVEL），
+# 失败时计入 xfail 而不是 fail，不构成 CI 失败。
+#
+# 但反向也要管：列进 XFAIL 的项**居然通过了**要单独报（xpass）。否则某天上游修好了、
+# 或者我们的构建变了，这条豁免会永远挂在那里，掩盖住一个本该收回的例外。
+# xpass 不判失败，但必须出现在报告里让人回来删。
+XFAIL_HITS=0; XPASS_HITS=0
+declare -a XNOTES=()
+_xfail_set() {
+  local t; t=$(printf '%s' "${TIER:-}" | tr '[:lower:]' '[:upper:]')
+  local extra; extra=$(eval "printf '%s' \"\${XFAIL_${t}:-}\"" 2>/dev/null || true)
+  printf '%s %s' "${XFAIL:-}" "$extra"
+}
+is_xfail() {   # $1 = 检查名（允许带尾随冒号）
+  local n=${1%:}
+  case " $(_xfail_set) " in *" $n "*) return 0;; esac
+  return 1
+}
+
+pass(){
+  local n=${1%% *}
+  if is_xfail "$n"; then
+    XPASS_HITS=$((XPASS_HITS+1))
+    XNOTES+=("  ⚑ $IMG $n 列在 XFAIL 里却通过了 —— 该例外可以收回")
+    PASS=$((PASS+1)); return 0
+  fi
+  PASS=$((PASS+1));
+}
+fail(){
+  local n=${1%% *}
+  if is_xfail "$n"; then
+    XFAIL_HITS=$((XFAIL_HITS+1))
+    XNOTES+=("  ○ $IMG $* （XFAIL，已知且预期）")
+    return 0
+  fi
+  FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $*")
+}
 
 # 发行版清单从 distros/*.conf 自动发现，避免与 Makefile / sbom.sh 三处各写一遍而漂移
 [ -n "${DISTROS:-}" ] && DISTROS_OVERRIDDEN=1
@@ -328,7 +379,8 @@ for DID in $DISTROS; do
   done
 done
 echo
-echo "══ 汇总: 通过 $PASS / 失败 $FAIL / 警告 $WARN"
+echo "══ 汇总: 通过 $PASS / 失败 $FAIL / 警告 $WARN / 期望失败 $XFAIL_HITS / 意外通过 $XPASS_HITS"
+[ ${#XNOTES[@]} -gt 0 ] && printf '%s\n' "${XNOTES[@]}"
 [ ${#PROBLEMS[@]} -gt 0 ] && printf '%s\n' "${PROBLEMS[@]}"
 
 # ── 检查数量基线 ────────────────────────────────────────────────────────────────
@@ -340,7 +392,9 @@ echo "══ 汇总: 通过 $PASS / 失败 $FAIL / 警告 $WARN"
 # 「某档没有 systemctl 因而少两项」这类合法波动。留旧基线不动等于让它失去鉴别力 ——
 # 360 对 5 个被试来说，整掉一个发行版（约 127 项）都还在线上。
 BASELINE=${BASELINE:-620}
-TOTAL_RUN=$((PASS+FAIL+WARN))
+# xfail 也算跑过的检查：不计进总数会让「加豁免」等于「让基线下降」，
+# 于是豁免越多、静默跳过越难被基线抓住。
+TOTAL_RUN=$((PASS+FAIL+WARN+XFAIL_HITS))
 # 只在**全量**跑时校基线：显式指定 DISTROS 是子集调试，撞基线没有意义
 if [ -n "${DISTROS_OVERRIDDEN:-}" ]; then
   echo "   检查总数 $TOTAL_RUN（子集运行，跳过基线校验）"
@@ -356,10 +410,18 @@ fi
 if [ -n "${RESULT_JSON:-}" ]; then
   mkdir -p "$(dirname "$RESULT_JSON")"
   {
-    printf '{"distro":"%s","arch":"%s","tiers":"%s","pass":%d,"fail":%d,"warn":%d,"total":%d,"problems":[' \
-      "$DISTROS" "${ARCH:-unknown}" "${TIERS:-micro base devel}" "$PASS" "$FAIL" "$WARN" "$TOTAL_RUN"
+    printf '{"distro":"%s","arch":"%s","tiers":"%s","pass":%d,"fail":%d,"warn":%d,"xfail":%d,"xpass":%d,"total":%d,"problems":[' \
+      "$DISTROS" "${ARCH:-unknown}" "${TIERS:-micro base devel}" "$PASS" "$FAIL" "$WARN" "$XFAIL_HITS" "$XPASS_HITS" "$TOTAL_RUN"
     _first=1
     for _p in "${PROBLEMS[@]:-}"; do
+      [ -n "$_p" ] || continue
+      [ "$_first" = 1 ] || printf ','
+      _first=0
+      printf '%s' "$_p" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()),end="")'
+    done
+    printf '],"xnotes":['
+    _first=1
+    for _p in "${XNOTES[@]:-}"; do
       [ -n "$_p" ] || continue
       [ "$_first" = 1 ] || printf ','
       _first=0

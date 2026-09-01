@@ -1,6 +1,6 @@
 name: 阶段二 · 构建单个镜像
 
-# 一个 job 只建一个（版本 × 架构 × 档位）。这样做的两点收益：
+# 一个 job 只建一个（版本 × 架构 × 档位），两条构建路径一视同仁。收益：
 #   · mmdebstrap 路径三档完全独立，并行后墙钟从 45 分钟降到最慢那一档的 29 分钟
 #   · 失败被隔离——devel 挂掉不再连带丢掉已经建好的 micro 与 base
 # 产物用 docker save 走 artifact 传给测试阶段，不推临时 tag 污染 GHCR。
@@ -12,7 +12,6 @@ on:
       tier:      { type: string, required: true }
       runner:    { type: string, required: true }
       needs-qemu: { type: boolean, default: false }
-      needs-stage: { type: boolean, default: false, description: "selfhost 置 true，会拉上游 stage 制品" }
 
 permissions:
   contents: read
@@ -53,13 +52,6 @@ jobs:
             dosbuild-cache:latest sleep infinity
           docker exec dosb bash -c 'ls -d /w/distros /w/buildkit/lib'
 
-      - name: 取上游 stage 制品
-        if: inputs.needs-stage
-        uses: actions/download-artifact@v4
-        with:
-          name: stage-${{ inputs.distro-id }}-${{ inputs.arch }}
-          path: out
-
       - name: 造本地源（仅需要的版本）
         env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
         run: |
@@ -82,7 +74,11 @@ jobs:
           # 宿主 Ubuntu 22.04 的 apt 与 mmdebstrap 差了好几代，signed-by 行为不同。
           # selfhost 在宿主跑，它自己 docker exec 进容器完成阶段 1。
           if [ "$M" = selfhost ]; then
-            sudo -E STAGE_FROM_TAR=yes DID='${{ inputs.distro-id }}' \
+            # 每个档位各自跑一遍 debootstrap --foreign。实测它只占约 4 分钟，
+            # 而三个档位是并行的，所以「共用一份 stage」省下的是 CPU 而不是墙钟，
+            # 却要多一个阶段、多一次 346 MB 的制品上传下载和一层 needs 依赖。
+            # 不值，故不共用。
+            sudo -E DID='${{ inputs.distro-id }}' \
               buildkit/build/build-selfhost.sh '${{ inputs.tier }}'
           else
             docker exec -e http_proxy= -e https_proxy= dosb bash -c \

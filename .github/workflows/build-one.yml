@@ -43,7 +43,26 @@ jobs:
             mmdebstrap debootstrap dpkg-dev gpgv xz-utils zstd file
           if [ "${{ inputs.needs-qemu }}" = true ]; then
             sudo apt-get install -y -qq --no-install-recommends qemu-user-static binfmt-support
-            ls /proc/sys/fs/binfmt_misc/ | head -20
+            echo "qemu-user-static: $(dpkg-query -W -f='${Version}' qemu-user-static)"
+            echo "已注册的 binfmt 条目："; ls /proc/sys/fs/binfmt_misc/ | sed 's/^/  /'
+            # 前置断言：目标架构的 binfmt 必须真的在。不断言的话，缺失会在
+            # 三次 mmdebstrap 重试之后才以
+            #   E: <arch> can neither be executed natively nor via qemu user emulation
+            # 的形式出现——那句话不提 qemu 版本，而真因往往正是版本太旧：
+            # LoongArch 用户态模拟是 QEMU 7.1 才加的，Ubuntu 22.04 只有 6.2。
+            case "${{ inputs.arch }}" in
+              loong64|loongarch64) NEED=qemu-loongarch64 ;;
+              arm64)               NEED=qemu-aarch64 ;;
+              armhf)               NEED=qemu-arm ;;
+              mips64el)            NEED=qemu-mips64el ;;
+              *)                   NEED="" ;;
+            esac
+            if [ -n "$NEED" ] && [ ! -e "/proc/sys/fs/binfmt_misc/$NEED" ]; then
+              echo "::error::binfmt 缺少 $NEED，无法模拟 ${{ inputs.arch }}。"
+              echo "::error::本机 qemu-user-static 为 $(dpkg-query -W -f='${Version}' qemu-user-static)；"
+              echo "::error::LoongArch 需要 QEMU 7.1 以上，Ubuntu 22.04 只带 6.2，请改用更新的 runner。"
+              exit 1
+            fi
           fi
           docker build -q --build-arg http_proxy= --build-arg https_proxy= \
             -f buildkit/Dockerfile.builder -t dosbuild-cache:latest buildkit/

@@ -3,6 +3,10 @@ name: 阶段四 · 汇总测试报告
 on:
   workflow_call:
     inputs:
+      expected:
+        type: number
+        default: 0
+        description: "应当收到的结果数。比检查总数基线更精确：某个 job 在跑到检查前就挂掉时不产出结果，总数会合法地变低而基线放过它"
       baseline:
         type: number
         default: 0
@@ -28,7 +32,7 @@ jobs:
           echo "收到的结果文件："
           find results -name '*.json' | sed 's/^/  /' || true
           python3 buildkit/tools/render-report.py results \
-            --baseline '${{ inputs.baseline }}' --out report.md
+            --baseline '${{ inputs.baseline }}' --expected '${{ inputs.expected }}' --out report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()

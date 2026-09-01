@@ -16,6 +16,10 @@ def main():
     ap.add_argument("results_dir")
     ap.add_argument("--baseline", type=int, default=0,
                     help="全部 job 的检查总数下限；0 表示不校验")
+    ap.add_argument("--expected", type=int, default=0,
+                    help="应当收到的结果数；0 表示不校验。这比检查总数基线更精确——"
+                         "某个 job 在跑到 verify 之前就挂掉时不会产出结果，"
+                         "检查总数会「合法地」变低而基线放过它，但结果数对不上会被抓住")
     ap.add_argument("--out", default="")
     a = ap.parse_args()
 
@@ -57,6 +61,11 @@ def main():
         exit_code = 1
     if bad_files:
         notes.append("❌ 有结果文件解析失败：" + "；".join(bad_files))
+        exit_code = 1
+    if a.expected and len(rows) != a.expected:
+        notes.append(f"❌ **收到 {len(rows)} 份结果，应为 {a.expected} 份**。"
+                     f"缺的那些 job 多半在跑到检查之前就失败了——它们不会产出结果，"
+                     f"于是检查总数「合法地」变低，只看基线抓不住。")
         exit_code = 1
     if a.baseline and rows and tot_all < a.baseline:
         notes.append(f"❌ **检查总数 {tot_all} 低于基线 {a.baseline}** —— 有检查被静默跳过了。"

@@ -27,6 +27,22 @@ jobs:
         with:
           submodules: recursive     # buildkit 是 submodule，不递归会拿到空目录
 
+      # submodule 钉的是脚本版本，uses: 钉的是本 workflow 的版本，两个 pin 各自独立。
+      # 不绑死的话会出现「用新 workflow 跑旧脚本」这种谁都没察觉的组合。
+      # github.job_workflow_sha 正是本可复用 workflow 所在仓库的 commit。
+      - name: 核对 submodule 与 workflow 同版本
+        run: |
+          set -eu
+          have=$(git -C buildkit rev-parse HEAD)
+          want="${{ github.job_workflow_sha }}"
+          echo "submodule=$have"
+          echo "workflow =$want"
+          [ "$have" = "$want" ] || {
+            echo "::error::buildkit submodule 与所调用 workflow 不是同一个 commit。"
+            echo "::error::请把 submodule 更新到 $want，或把 uses: 指向 $have。"
+            exit 1
+          }
+
       - name: 安装构建依赖
         run: |
           sudo apt-get update

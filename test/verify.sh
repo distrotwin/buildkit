@@ -288,6 +288,8 @@ for DID in $DISTROS; do
                # NOUPDATE 单独报，把镜像内的真实报错带出来，否则只有一个结论没有线索
                if [ "$(g apt_roundtrip)" = NOUPDATE ]; then
                  fail "apt_roundtrip: apt-get update 失败了 — $(g apt_update_err)"
+               elif [ "$(g apt_roundtrip)" = "N(未装)" ]; then
+                 fail "apt_roundtrip: 装不上测试包 — $(g apt_install_err)"
                else
                  check apt_roundtrip Y "$(g apt_roundtrip)"
                fi

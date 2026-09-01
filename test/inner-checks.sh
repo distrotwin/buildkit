@@ -223,7 +223,18 @@ if [ -x /usr/bin/apt-get ]; then
   done
   [ "$_upd" = yes ] || kv apt_update_err "${_uerr:-无输出}"
   if [ "$_upd" = yes ]; then
-    DEBIAN_FRONTEND=noninteractive T 90 /usr/bin/apt-get install -y -qq --no-install-recommends nano >/dev/null 2>&1
+    # 安装同样在下载，同样会撞上源的偶发卡死，所以同样要重试并留下报错。
+    # 上一轮只给 update 加了重试，于是失败从 NOUPDATE 变成 N(未装)——
+    # 症状换了个名字，根因（网络抖动 + 单次尝试 + 报错被丢弃）一模一样。
+    # 教训：这条检查里每一个网络操作都要有重试和错误留存，不能逐个补。
+    _ins=no; _ierr=""
+    for _j in 1 2 3; do
+      if DEBIAN_FRONTEND=noninteractive T 120 /usr/bin/apt-get install -y -qq \
+           --no-install-recommends nano >/dev/null 2>/tmp/.aptins.err; then _ins=yes; break; fi
+      _ierr=$(tr '\n' ' ' < /tmp/.aptins.err 2>/dev/null | tail -c 300)
+      sleep 5
+    done
+    [ "$_ins" = yes ] || kv apt_install_err "${_ierr:-无输出}"
     st=$(dpkg-query $A -W -f='${Status}' nano 2>/dev/null)
     if [ "$st" = "install ok installed" ]; then
       DEBIAN_FRONTEND=noninteractive T 60 /usr/bin/apt-get purge -y -qq nano >/dev/null 2>&1

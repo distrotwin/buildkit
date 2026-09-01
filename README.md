@@ -67,6 +67,22 @@ submodule 钉 commit 是刻意的：升级 buildkit 是一次显式提交，不�
 
 `distros/*.conf` 需要提供的键见 `docs/distro-conf.md`。最少要有 `DID` `FAMILY` `METHOD` `MIRROR` `SUITE` `COMPONENTS`，以及三档各自的 `*_INCLUDE`。
 
+## 厂商镜像站的两类坑
+
+**`Release` 会声明镜像站并不提供的索引。** 实测：麒麟 `dists/11.0/Release` 同时列出 `main/binary-arm64/Packages` 与 `Packages.gz`，而未压缩那个是 404，只有 `.gz` 存在。apt 在首选变体取失败后会回退到未压缩变体，撞上 404；mmdebstrap 的 `--error-on=any` 让它立即致命。因此构建时把 `gz` 提到 `Acquire::CompressionTypes::Order` 首位，让 apt 优先走确实存在的那个。
+
+**debootstrap 会核对 suite 名，apt 不会。** 麒麟 `dists/4.0.2/Release` 里 `Suite` 与 `Codename` 都自称 `4.0.2-desktop`，于是 `debootstrap ... 4.0.2` 报 `E: Asked to install suite 4.0.2, but got 4.0.2-desktop from mirror` 而拒绝，而同一个源用 mmdebstrap 走 apt 则毫无问题。同一个源两个工具一个接受一个拒绝，这类差异只能靠实跑发现。conf 里的 `SUITE` 要写 Release 自述的那个名字。
+
+## 超时与重试的相互作用
+
+源对境外出口偶发卡死（返回 200、`Content-Length` 正确、body 0 字节直到超时），但吞吐本身不差——实测 1.45 MB/s，比国内直连快得多。所以重试有效，不必自建镜像。
+
+但**收紧超时会制造新故障**。曾把 `Acquire::http::Timeout` 收到 45 秒，想让卡死的连接尽快进入重试；结果 27 MB 的 `Packages.gz` 在慢节点上拉不完，apt 转而回退到未压缩变体并撞上 404。症状是一个看起来百分之百属于源的 404，而真因是自己上一轮的缓解措施。**改超时之前先算清最大的单个文件在该超时内需要多少带宽。**
+
+重试要放在**档位级**而不是只靠 apt 自己的 `Acquire::Retries`：后者只覆盖单次 `apt-get update`，而每个档位都要重跑一遍完整的 update 加 download。
+
+另外，被重试包住的函数里不能用 `die`——`die` 是 `exit`，会把整个脚本带走，重试永远不会发生。这类失败要 `return` 非零。写完请做变异测试：让函数前两次失败第三次成功，确认确实调用了三次。「加了重试」和「重试真的会发生」是两件事。
+
 ## 取数纪律
 
 外部索引与包体在下载途中被截断是常态，而下游工具**不会报错**：`zcat` 对截断的 gz 照常吐出前半段，`ar x` 对截断的 deb 少解一个成员也返回成功。据此得出的包数、版本、缺失清单全是假的。

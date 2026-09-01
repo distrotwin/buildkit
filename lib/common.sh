@@ -95,6 +95,13 @@ EOF
   printf 'Apt::AutoRemove::SuggestsImportant "false";\n' > "$R/etc/apt/apt.conf.d/docker-autoremove-suggests"
   # 麒麟 key 自签名是 SHA1，容器内 apt 也要走 gpgv
   printf 'APT::Key::gpgvcommand "gpgv";\n'               > "$R/etc/apt/apt.conf.d/docker-gpgv"
+  # 出厂镜像自带 apt 重试。用户拉到这些镜像后面对的是同一个厂商源，而它对境外出口
+  # 偶发卡死（返回 200、Content-Length 正确、body 零字节）。
+  # Timeout 是**不活动**超时——manpage 原文 "applies to the connection as well as
+  # the data timeout"，只要数据在流就不触发，所以 45 秒对多大的索引都安全；
+  # 曾误当成总时长上限而调到 180，结果单个卡死的包最坏耗时翻四倍。
+  printf 'Acquire::Retries "3";\nAcquire::http::Timeout "45";\n' \
+                                                         > "$R/etc/apt/apt.conf.d/docker-retries"
   # ⚠️ 不设 force-unsafe-io。麒麟 V11 的 dpkg 1.22.6-ok3k1.9 在这个代码路径上有缺陷：
   #    一旦启用，容器内 apt 安装任何新包都会在 configure 阶段段错误（core dumped），
   #    且随后的 `dpkg --configure -a` 也会崩。实测去掉后装/卸完全干净。

@@ -208,7 +208,16 @@ else kv compile_cxx n/a; fi
 #    恰好避开了唯一会失败的类别：厂商 dpkg 在 configure 阶段也会 segv，
 #    而无脚本的包 configure 是空操作，所以 tree 永远能过。
 if [ -x /usr/bin/apt-get ]; then
-  if T 60 /usr/bin/apt-get update -qq >/dev/null 2>&1; then
+  # 三次重试。这条检查要回答的是「这个镜像能不能装包」，而不是「此刻网络好不好」。
+  # 源对境外出口偶发卡死（返回 200、Content-Length 正确、body 零字节），单次 60 秒
+  # 足以被打穿：实测同一版本同一架构的 devel 通过而 base 报 NOUPDATE，两者的
+  # sources.list 完全一样——那是网络抖动，不是镜像缺陷。
+  _upd=no
+  for _i in 1 2 3; do
+    if T 60 /usr/bin/apt-get update -qq >/dev/null 2>&1; then _upd=yes; break; fi
+    sleep 5
+  done
+  if [ "$_upd" = yes ]; then
     DEBIAN_FRONTEND=noninteractive T 90 /usr/bin/apt-get install -y -qq --no-install-recommends nano >/dev/null 2>&1
     st=$(dpkg-query $A -W -f='${Status}' nano 2>/dev/null)
     if [ "$st" = "install ok installed" ]; then

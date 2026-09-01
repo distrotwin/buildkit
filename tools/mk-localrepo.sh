@@ -20,7 +20,10 @@ rm -rf "$REPO"; mkdir -p "$REPO"
 if [ -n "${REPACK_DEBS:-}" ]; then
   for p in $REPACK_DEBS; do
     tmp=$(mktemp -d); cd "$tmp"
-    curl -fsS --max-time 180 -O "${MIRROR%/}/$p" || die "下不到 $p"
+    # 走 fetch_exact：这个源会「返回 200 且 Content-Length 正确、body 零字节」，
+    # 实测撞过一次——35 KB 的 deb 等满 180 秒收到 0 字节。靠 --max-time 卡时长
+    # 区分不了慢与卡死，见 lib/common.sh::fetch_exact 的说明。
+    fetch_exact "${MIRROR%/}/$p" "$(basename "$p")" 5 || die "下不到 $p（五轮重试均失败）"
     deb=$(basename "$p")
     dpkg-deb -R "$deb" x
     chmod 755 x x/DEBIAN

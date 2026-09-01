@@ -9,6 +9,31 @@ KEYRING="${KEYRING:-$ROOT/keys/kylin-archive-keyring.gpg}"
 # 架构参数化（ARCH / MULTIARCH / EXPECT_LOADER）
 . "$(dirname "${BASH_SOURCE[0]}")/arch.sh"
 
+# 统一的取源函数：fetch_exact <url> <out> [重试次数]
+#
+# 用 --speed-limit/--speed-time 而不是靠 --max-time 卡时长。这个源对境外出口的
+# 故障形态是「返回 200、Content-Length 正确、body 一个字节都不来」，而 --max-time
+# 区分不了「慢但在进」和「卡死不动」：收紧它会砍掉本来能成的大文件（27 MB 的索引
+# 在 45 秒内需要 590 KB/s），放宽它会让一个 35 KB 的卡死连接白等三分钟。
+# --speed-limit 1024 --speed-time 30 的含义是「持续 30 秒低于 1 KB/s 就放弃」，
+# 1.45 MB/s 的正常传输不受影响，卡死的 30 秒内退出并重试。
+#
+# 落地后必须校验字节非空：只看 curl 退出码会把「拿到空文件」当成拿到了。
+fetch_exact() {
+  local url=$1 out=$2 tries=${3:-5} i
+  for i in $(seq 1 "$tries"); do
+    rm -f "$out"
+    if curl -fsS --connect-timeout 20 --speed-limit 1024 --speed-time 30 \
+         --retry 2 --retry-delay 3 --retry-all-errors -o "$out" "$url" \
+       && [ -s "$out" ]; then
+      return 0
+    fi
+    log "取 $url 第 $i 次未成（落地 $(stat -c%s "$out" 2>/dev/null || echo 0) 字节）"
+    sleep 5
+  done
+  return 1
+}
+
 log()  { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die()  { printf '[%s] 致命: %s\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
 
@@ -37,16 +62,7 @@ verify_repo_signature() {
   # 国内归档站对境外出口不稳定：实测过「返回 200 且 Content-Length 正确、
   # body 却是 0 字节直到超时」。所以必须重试，并且**校验落地字节非空**——
   # 只看 curl 退出码会把「拿到空文件」当成拿到了。
-  local got=no
-  for _i in 1 2 3 4 5; do
-    rm -f "$tmp/InRelease"
-    if curl -fsS --connect-timeout 20 --max-time 240 --retry 3 --retry-delay 3 \
-         --retry-all-errors -o "$tmp/InRelease" "$base/dists/$suite/InRelease" \
-       && [ -s "$tmp/InRelease" ]; then got=yes; break; fi
-    log "取 InRelease 第 $_i 次未成（落地 $(stat -c%s "$tmp/InRelease" 2>/dev/null || echo 0) 字节），重试"
-    sleep 5
-  done
-  if [ "$got" != yes ]; then
+  if ! fetch_exact "$base/dists/$suite/InRelease" "$tmp/InRelease" 5; then
     rm -rf "$tmp"; die "取不到 $suite 的 InRelease（五轮重试均失败）"
   fi
   if gpgv --keyring "$KEYRING" "$tmp/InRelease" 2>&1 | grep -q "Good signature"; then

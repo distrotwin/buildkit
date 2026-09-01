@@ -61,7 +61,12 @@ fi
 # --exclude 那行都不打印（整个阶段 1 被跳过）。漏一个输入等于把「改了配置」
 # 静默降级成「什么都没改」，而且不报错，最容易让人去怀疑修法本身。
 STAGE_FP=$(printf '%s|%s|%s|%s|%s|%s' "$MIRROR" "$SUITE" "$COMPONENTS" "${STAGE_INCLUDE:-}" "${PIN_NEVER:-}" "$KEYRING_FP" | sha256sum | cut -c1-16)
-if [ "$(cat "$ROOT_HOST/work/$DID-stage/.foreign-done" 2>/dev/null)" != "$STAGE_FP" ]; then
+# STAGE_FROM_TAR 时必须连阶段 1 一起跳过：新 job 里 work 目录不存在，
+# .foreign-done 指纹必然不匹配，debootstrap 会照跑一遍——传 tar 就白传了，
+# 而且不报错，只是慢二十来分钟，最容易被当成「拆分没带来收益」。
+if [ "${STAGE_FROM_TAR:-no}" = yes ] && [ -s "$ROOT_HOST/out/$DID-stage.tar" ]; then
+  log "[$DID] 阶段1: 跳过（复用上游 job 传来的 stage tar）"
+elif [ "$(cat "$ROOT_HOST/work/$DID-stage/.foreign-done" 2>/dev/null)" != "$STAGE_FP" ]; then
   if [ "${NO_CHECK_GPG:-no}" = yes ]; then
     DB_GPG_ARG="--no-check-gpg"
   else
@@ -98,9 +103,25 @@ if [ "$(cat "$ROOT_HOST/work/$DID-stage/.foreign-done" 2>/dev/null)" != "$STAGE_
 fi
 
 # ── 阶段 2：导入容器，用麒麟自己的 dpkg 自举 configure
-log "[$DID] 阶段2: 打包 stage 并导入"
-docker exec "$BUILDER" bash -c "cd $STAGE && tar --numeric-owner -cf $CROOT/out/$DID-stage.tar --exclude=./.foreign-done ." || exit 1
+#
+# 阶段 1 的 stage 是三档共用的（实测占 selfhost 总耗时的三分之二），所以把它与
+# 档位构建拆到不同 job 时，靠传递 out/<did>-stage.tar 复用，而不是各建一遍。
+#   STAGE_ONLY=yes   只产出 stage tar 就退出，供上游 job 用
+#   已存在 stage tar 时直接 import，跳过阶段 1 与打包
+if [ -s "$ROOT_HOST/out/$DID-stage.tar" ] && [ "${STAGE_ONLY:-no}" != yes ] \
+   && [ "${STAGE_FROM_TAR:-no}" = yes ]; then
+  log "[$DID] 阶段2: 复用既有 stage tar（$(stat -c%s "$ROOT_HOST/out/$DID-stage.tar") 字节）"
+else
+  log "[$DID] 阶段2: 打包 stage 并导入"
+  docker exec "$BUILDER" bash -c "cd $STAGE && tar --numeric-owner -cf $CROOT/out/$DID-stage.tar --exclude=./.foreign-done ." || exit 1
+fi
 docker import "$ROOT_HOST/out/$DID-stage.tar" "$IMAGE:_stage" >/dev/null
+
+if [ "${STAGE_ONLY:-no}" = yes ]; then
+  log "[$DID] STAGE_ONLY：stage tar 就绪（$(stat -c%s "$ROOT_HOST/out/$DID-stage.tar") 字节），不建档位"
+  docker rmi "$IMAGE:_stage" >/dev/null 2>&1 || true
+  exit 0
+fi
 
 for TIER in $TIERS; do
   log "[$DID/$TIER] 阶段3: 自举配置 + 装档位包"

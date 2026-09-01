@@ -1,0 +1,38 @@
+name: 阶段四 · 汇总测试报告
+
+on:
+  workflow_call:
+    inputs:
+      baseline:
+        type: number
+        default: 0
+        description: "全部镜像的检查总数下限；0 不校验。防的是检查被静默跳过——拆成单镜像 job 后 verify.sh 里那道基线对子集失去意义，只能上移到这里"
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+          merge-multiple: true
+      - name: 渲染报告
+        run: |
+          set -eu
+          echo "收到的结果文件："
+          find results -name '*.json' | sed 's/^/  /' || true
+          python3 buildkit/tools/render-report.py results \
+            --baseline '${{ inputs.baseline }}' --out report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report
+          path: report.md
+          retention-days: 30

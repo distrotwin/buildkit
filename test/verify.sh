@@ -30,6 +30,11 @@ fail(){ FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $*"); }
 
 # 发行版清单从 distros/*.conf 自动发现，避免与 Makefile / sbom.sh 三处各写一遍而漂移
 [ -n "${DISTROS:-}" ] && DISTROS_OVERRIDDEN=1
+# 档位也可限定：拆成「一个镜像一个 job」之后，每个 test job 只验一个档位。
+# 注意这会让下面的「检查总数基线」失去意义——子集当然低于全量基线。
+# 防线不能就此消失，而是上移：每个 job 用 RESULT_JSON 输出自己的检查数，
+# 由汇总阶段把各 job 的总数相加后再对基线。
+[ -n "${TIERS:-}" ] && DISTROS_OVERRIDDEN=1
 DISTROS=${DISTROS:-$(ls "$ROOT"/distros/*.conf 2>/dev/null | xargs -r -n1 basename | sed 's/\.conf$//' | tr '\n' ' ')}
 
 # IMAGE 撞名守卫：两份 conf 用同一个本地 tag 时，构建会互相覆盖，而本脚本会
@@ -60,7 +65,7 @@ for DID in $DISTROS; do
         SRC_ROOTFS ISO_URL ISO_SQUASHFS_PATH SQUASHFS_SHA256 DEBOOTSTRAP_SCRIPT \
         FAMILY EXPECT_SHADOW NO_CHECK_GPG RPM_DB_BACKEND MEDIA_DIR
   . "$ROOT/distros/$DID.conf"
-  for TIER in micro base devel; do
+  for TIER in ${TIERS:-micro base devel}; do
     IMG="$IMAGE:$TIER"
     docker image inspect "$IMG" >/dev/null 2>&1 || { echo "  ✗ $IMG 不存在"; FAIL=$((FAIL+1)); continue; }
     out=$(docker run --rm -e http_proxy= -e https_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= \
@@ -338,6 +343,24 @@ elif [ "$TOTAL_RUN" -lt "$BASELINE" ]; then
   exit 1
 else
   echo "   检查总数 $TOTAL_RUN（基线 $BASELINE）"
+fi
+
+# 机器可读结果，供汇总阶段合并成报告。problems 逐条转义成 JSON 字符串。
+if [ -n "${RESULT_JSON:-}" ]; then
+  mkdir -p "$(dirname "$RESULT_JSON")"
+  {
+    printf '{"distro":"%s","arch":"%s","tiers":"%s","pass":%d,"fail":%d,"warn":%d,"total":%d,"problems":[' \
+      "$DISTROS" "${ARCH:-unknown}" "${TIERS:-micro base devel}" "$PASS" "$FAIL" "$WARN" "$TOTAL_RUN"
+    _first=1
+    for _p in "${PROBLEMS[@]:-}"; do
+      [ -n "$_p" ] || continue
+      [ "$_first" = 1 ] || printf ','
+      _first=0
+      printf '%s' "$_p" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()),end="")'
+    done
+    printf ']}\n'
+  } > "$RESULT_JSON"
+  echo "   结果已写入 $RESULT_JSON"
 fi
 
 [ "$FAIL" -eq 0 ] && echo "✅ 全部必过项通过" || echo "❌ 有 $FAIL 项未过"

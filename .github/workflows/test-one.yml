@@ -1,0 +1,73 @@
+name: 阶段三 · 启动并全面测试单个镜像
+
+# 与构建分离的独立阶段：把上游产出的镜像装载进来、真正启动它、跑完整检查集，
+# 输出机器可读结果供汇总阶段合并成报告。
+#
+# 分离的意义不只是并行：构建阶段的机器状态（builder 容器、本地源、宿主装的包）
+# 会掩盖镜像自身的缺陷——例如镜像里缺 CA 证书，但宿主有，某些检查就可能借到。
+# 这里是一台干净机器，只有被测镜像。
+on:
+  workflow_call:
+    inputs:
+      distro-id: { type: string, required: true }
+      arch:      { type: string, required: true }
+      tier:      { type: string, required: true }
+      runner:    { type: string, required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: img-${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}
+          path: ship
+
+      - name: 装载镜像
+        run: |
+          set -eu
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
+          zstd -d -c ship/image.tar.zst | docker load
+          IMG=$(cat ship/image-ref.txt)
+          docker image inspect "$IMG" >/dev/null || { echo "::error::装载后镜像 $IMG 不存在"; exit 1; }
+          echo "已装载 $IMG（$(docker images "$IMG" --format '{{.Size}}')）"
+
+      - name: 冒烟：能不能真正启动
+        run: |
+          set -eu
+          IMG=$(cat ship/image-ref.txt)
+          # 只用 shell 内建，不依赖镜像里有没有 coreutils：
+          # rootfs 里没有某个命令时，容器会沿 PATH 找不到而报错，
+          # 那是「镜像缺工具」而不是「起不来」，两者要分开。
+          out=$(docker run --rm "$IMG" /bin/bash -c 'echo SMOKE_OK; echo $MACHTYPE' 2>&1) || {
+            echo "::error::镜像起不来: $out"; exit 1; }
+          printf '%s\n' "$out" | sed 's/^/  /'
+          printf '%s' "$out" | grep -q SMOKE_OK || { echo "::error::启动了但没有预期输出"; exit 1; }
+
+      - name: 编门禁二进制
+        env: { ARCH: "${{ inputs.arch }}" }
+        run: sudo -E ARCH="$ARCH" buildkit/gate/build-gates.sh
+
+      - name: 全面检查
+        env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
+        run: |
+          set -eu
+          sudo -E ARCH="$ARCH" \
+            DISTROS='${{ inputs.distro-id }}' TIERS='${{ inputs.tier }}' \
+            RESULT_JSON="$ROOT/results/${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}.json" \
+            buildkit/test/verify.sh '${{ inputs.distro-id }}'
+
+      # 失败也要把结果交上去，否则报告里这一格是空白，分不清「没跑」和「跑挂了」
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result-${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}
+          path: results/
+          retention-days: 7
+          if-no-files-found: warn

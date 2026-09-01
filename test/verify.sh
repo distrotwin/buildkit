@@ -132,9 +132,16 @@ for DID in $DISTROS; do
     # tzdata 的规范名随年代变：Debian 10 那一代 /usr/share/zoneinfo/UCT 是真文件、
     # Etc/UTC 是指向它的链接，`readlink -f` 因此解析到 UCT。同一时刻、不同命名，
     # 不是缺陷。判据接受两者。
+    # UTC 在 IANA tz 库里有一整组 backward 兼容别名，它们的时区数据**字节完全相同**
+    # （实测 UTC / Etc/UTC / Etc/Zulu 的 sha256 一致）。老发行版的 tzdata 常把
+    # /etc/localtime 解到其中某个别名上：银河麒麟 V4 解到 Zulu，于是原先只认三个
+    # 名字的判据把一个完全正确的时区判成了失败。
+    # 这是尺子的校准问题而不是被试的缺陷——接入比原有被试更老的系统时，
+    # 先问「量的是尺子还是被试」。
     case "$(g localtime)" in
-      Etc/UTC|UTC|UCT) pass "localtime $(g localtime)" ;;
-      *) fail "localtime: 期望 Etc/UTC/UTC/UCT，实际 $(g localtime)" ;;
+      UTC|UCT|Zulu|Universal|Greenwich|Etc/UTC|Etc/UCT|Etc/Zulu|Etc/Universal|Etc/Greenwich)
+        pass "localtime $(g localtime)" ;;
+      *) fail "localtime: 期望 UTC 或其 IANA 别名，实际 $(g localtime)" ;;
     esac
     # machine-id 必须存在且为空（systemd 的 first-boot 语义）——report.md §7（验收） 列了却一直没接线
     check machine_id_empty Y "$(g machine_id_empty)"

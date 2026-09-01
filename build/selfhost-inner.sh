@@ -58,7 +58,18 @@ mkdir -p /etc/apt/preferences.d /usr/share/keyrings
 # 出现在最新加入的被试上。审稿复核抓到，verify.py 的 keyring 断言当时就在报失败，
 # 而我把它混在一批「断言过时」里没有逐条读 —— 失败清单太长会淹没真问题。
 if [ "${NO_CHECK_GPG:-no}" != yes ]; then
-  cp /keys/kylin-archive-keyring.gpg /usr/share/keyrings/ 2>/dev/null || true
+  # 必须先建目录：/usr/share/keyrings 是 Debian 10 / Ubuntu 18.04 之后才有的，
+  # 银河麒麟 V4 那种 16.04 血脉的最小 rootfs 里没有它。
+  # 也不能再用 `|| true` 吞掉失败——原先那句在 V4 上必然失败并被静默忽略，
+  # 随后 sources.list 的 signed-by 指向不存在的文件，表现是出厂镜像里
+  # apt-get update 失败（记为 apt_roundtrip=NOUPDATE）。症状离真因隔了三步，
+  # 而中间那一步一声不吭。V10 SP1 是 20.04 血脉、V11 更新，两者自带该目录，
+  # 所以只有 V4 触发。
+  mkdir -p /usr/share/keyrings
+  cp /keys/kylin-archive-keyring.gpg /usr/share/keyrings/ \
+    || { say "致命: keyring 拷贝失败，出厂镜像的 signed-by 会指向不存在的文件"; exit 1; }
+  [ -s /usr/share/keyrings/kylin-archive-keyring.gpg ] \
+    || { say "致命: keyring 落位后为空"; exit 1; }
 else
   say "介质无签名（NO_CHECK_GPG=yes），不注入任何 keyring"
 fi

@@ -31,6 +31,11 @@ for _t in $TIERS; do
   esac
 done
 STAGE=$CROOT/work/$DID-stage
+# 自己建目录，不依赖调用方。以前只有 build.sh 会调本脚本、由它 mkdir -p out/，
+# 拆出独立的 stage 阶段后直接调用就少了这一步，表现是
+#   tar: /w/out/<did>-stage.tar: Cannot open: No such file or directory
+# ——报错说的是 tar，真因是目录没建。
+mkdir -p "$ROOT_HOST/out" "$ROOT_HOST/work"
 log(){ printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 # ── 阶段 0：独立验签（debootstrap 用 gpgv，能接受麒麟 key 的 SHA1 自签名）

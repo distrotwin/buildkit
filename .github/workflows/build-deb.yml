@@ -56,10 +56,14 @@ jobs:
       # 死在 debootstrap 里、报错还指向别处。
       - name: 探源可达性
         env:
+          ARCH: ${{ inputs.arch }}
           ROOT: ${{ github.workspace }}
         run: |
           set -eu
-          . "./distros/${{ inputs.distro-id }}.conf"
+          # 用 conf-get 而不是直接 source：conf 里有按 ARCH 分支的覆写，
+          # 直接 source 就要求每个步骤都记得传 ARCH，漏一个的报错
+          # （conf: line N: ARCH: unbound variable）离真因很远。
+          read -r MIRROR SUITE <<<"$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' MIRROR SUITE | tr '\n' ' ')"
           U="${MIRROR%/}/dists/$SUITE/Release"
           echo "探测 $U"
           code=$(curl -s -o /tmp/rel -w '%{http_code}' --max-time 60 "$U" || echo 000)
@@ -123,8 +127,9 @@ jobs:
           ROOT: ${{ github.workspace }}
         run: |
           set -eu
-          . "./distros/${{ inputs.distro-id }}.conf"
-          if [ -n "${REPACK_DEBS:-}" ] || [ -n "${STUB_PROVIDES:-}" ]; then
+          RD=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' REPACK_DEBS)
+          SP=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' STUB_PROVIDES)
+          if [ -n "$RD" ] || [ -n "$SP" ]; then
             sudo -E buildkit/tools/mk-localrepo.sh "${{ inputs.distro-id }}"
           else
             echo "${{ inputs.distro-id }} 无 REPACK_DEBS / STUB_PROVIDES，跳过本地源"

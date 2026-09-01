@@ -1,0 +1,102 @@
+name: 阶段三 · 发布一个档位的跨架构镜像
+
+# 在测试全绿之后才发布：把同一档位各架构的镜像制品装载、打 tag 推到 GHCR，
+# 再合并成一个 manifest list。一个 job 负责一个（版本 × 档位），
+# 内部处理该档位的全部架构。
+#
+# 每档同时打两个 tag：滚动的给人用，带日期的不可变，供 CI 钉死。
+# 滚动 tag 会随重建而变，而这批镜像的价值在于 ABI 保真——用户必须能钉死一版。
+on:
+  workflow_call:
+    inputs:
+      distro-id:  { type: string, required: true }
+      tier:       { type: string, required: true }
+      image:      { type: string, required: true, description: "GHCR 仓库名，如 kylin" }
+      tag-prefix: { type: string, required: true, description: "版本前缀，如 v11" }
+      arches:     { type: string, required: true, description: "空格分隔" }
+      latest:     { type: boolean, default: false, description: "该档位是否同时打成 latest" }
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: img-${{ inputs.distro-id }}-*-${{ inputs.tier }}
+          path: imgs
+
+      - name: 装载各架构镜像
+        run: |
+          set -eu
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
+          found=0
+          for d in imgs/*/; do
+            [ -f "$d/image.tar.zst" ] || continue
+            zstd -d -c "$d/image.tar.zst" | docker load
+            found=$((found+1))
+          done
+          # 一个都没装上时必须失败：后面的 docker tag 会报「镜像不存在」，
+          # 那个报错指向 tag 而不是指向「制品没下来」，离真因很远。
+          [ "$found" -gt 0 ] || { echo "::error::没有装载到任何镜像制品"; exit 1; }
+          echo "装载了 $found 个镜像制品"
+          docker images --format '{{.Repository}}:{{.Tag}}' | sed 's/^/  /'
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 推送各架构 tag
+        env:
+          REG: ghcr.io/${{ github.repository_owner }}/${{ inputs.image }}
+          PFX: ${{ inputs.tag-prefix }}
+          TIER: ${{ inputs.tier }}
+        run: |
+          set -eu
+          STAMP=$(date -u +%Y%m%d)
+          pushed=""
+          for a in ${{ inputs.arches }}; do
+            SRC=$(cat "imgs/img-${{ inputs.distro-id }}-$a-$TIER/image-ref.txt" 2>/dev/null || true)
+            [ -n "$SRC" ] || { echo "跳过 $a：没有该架构的制品"; continue; }
+            docker image inspect "$SRC" >/dev/null 2>&1 || { echo "跳过 $a：镜像 $SRC 未装载"; continue; }
+            for T in "$PFX-$TIER-$a" "$PFX-$TIER-$a-$STAMP"; do
+              docker tag "$SRC" "$REG:$T"
+              docker push -q "$REG:$T"
+              echo "  推送 $REG:$T"
+            done
+            pushed="$pushed $REG:$PFX-$TIER-$a"
+          done
+          [ -n "$pushed" ] || { echo "::error::一个架构都没推成功"; exit 1; }
+          printf '%s' "$pushed" > /tmp/pushed.txt
+
+      - name: 合并 manifest list
+        env:
+          REG: ghcr.io/${{ github.repository_owner }}/${{ inputs.image }}
+          PFX: ${{ inputs.tag-prefix }}
+          TIER: ${{ inputs.tier }}
+        run: |
+          set -eu
+          SRCS=$(cat /tmp/pushed.txt)
+          # manifest list 的隐含契约是各架构变体互为等价物。国产系统的 LoongArch
+          # 移植常常是独立产品线（glibc 可能落后一个大版本），那种情况下同一个 tag
+          # 在不同架构下的 ABI 并不一致——这不是错误，但必须在仓库说明里写清楚，
+          # 否则用户会把 amd64 上验过的结论套到别的架构上。
+          docker manifest create "$REG:$PFX-$TIER" $SRCS
+          docker manifest push -q "$REG:$PFX-$TIER"
+          echo "  manifest $REG:$PFX-$TIER ←$SRCS"
+          # 不带档位后缀的 tag 指向 devel，与 golang:1.21 是完整版的惯例一致
+          if [ "$TIER" = devel ]; then
+            docker manifest create "$REG:$PFX" $SRCS
+            docker manifest push -q "$REG:$PFX"
+            echo "  manifest $REG:$PFX"
+          fi
+          if [ "${{ inputs.latest }}" = true ]; then
+            docker manifest create "$REG:latest" $SRCS
+            docker manifest push -q "$REG:latest"
+            echo "  manifest $REG:latest"
+          fi

@@ -74,12 +74,16 @@ build_mmdebstrap() {
       --skip=chroot/policy-rc.d \
       --aptopt='APT::Key::gpgvcommand "gpgv"' \
       --aptopt='Acquire::Retries "5"' \
+      --aptopt='Acquire::http::Timeout "45"' \
       --aptopt='Acquire::Languages "none"' \
       --aptopt='APT::Install-Recommends "false"' \
       --setup-hook="ROOT=$ROOT DID=$DID KEYRING=$KEYRING $BK/build/setup.sh \"\$1\"" \
       --customize-hook="ROOT=$ROOT DID=$DID TIER=$TIER $BK/build/customize.sh \"\$1\"" \
       "$SUITE" "$OUT" -
-  [ -s "$OUT" ] || die "[$DID/$TIER] 无产物"
+  # 这里必须 return 而不是 die：调用方对本函数做了档位级重试，而 die 是 exit，
+  # 会把整个脚本带走、重试永远不会发生。函数在 AND-list 里被调用时 set -e 被抑制，
+  # 所以 mmdebstrap 失败后能走到这一行；只要这一行不 exit，重试就成立。
+  [ -s "$OUT" ] || { log "[$DID/$TIER] 无产物"; return 1; }
   log "[$DID/$TIER] 完成 $(du -h "$OUT"|cut -f1)"
 }
 
@@ -216,6 +220,7 @@ build_debmedia() {
       "${INC_ARG[@]}" "${HOOKS[@]}" "${EXC[@]}" \
       --skip=chroot/policy-rc.d \
       --aptopt='Acquire::Retries "5"' \
+      --aptopt='Acquire::http::Timeout "45"' \
       --aptopt='Acquire::Languages "none"' \
       --aptopt='APT::Install-Recommends "false"' \
       --setup-hook="ROOT=$ROOT DID=$DID KEYRING=$KEYRING $BK/build/setup.sh \"\$1\"" \
@@ -264,13 +269,25 @@ if [ "$METHOD" = selfhost ]; then
   log "[$DID] 转 selfhost 两段式：$TIERS"
   DID=$DID ROOT=$ROOT BK=$BK ARCH=$ARCH "$BK/build/build-selfhost.sh" $TIERS
 else
+  # 档位级重试。源对境外出口偶发卡死：实测过「返回 200、Content-Length 正确、
+  # body 0 字节直到超时」，也见过 apt 报 Connection timed out。吞吐本身没问题
+  # （实测 1.45 MB/s），是间断性的，所以重试有效而换镜像没必要。
+  # apt 自己的 Acquire::Retries 只覆盖单次 update 内的重试，每个档位都要重跑一遍
+  # 完整的 update + download，所以还需要这一层。
   for T in $TIERS; do
-    case $METHOD in
-      mmdebstrap) build_mmdebstrap "$T" ;;
-      slice)      build_slice "$T" ;;
-      debmedia)   build_debmedia "$T" ;;
-      rpmmedia)   build_rpmmedia "$T" ;;
-    esac
+    _ok=no
+    for _try in 1 2 3; do
+      case $METHOD in
+        mmdebstrap) build_mmdebstrap "$T" && _ok=yes ;;
+        slice)      build_slice "$T"      && _ok=yes ;;
+        debmedia)   build_debmedia "$T"   && _ok=yes ;;
+        rpmmedia)   build_rpmmedia "$T"   && _ok=yes ;;
+      esac
+      [ "$_ok" = yes ] && break
+      log "[$DID/$T] 第 $_try 次未成，30 秒后重试"
+      sleep 30
+    done
+    [ "$_ok" = yes ] || die "[$DID/$T] 三次尝试均失败"
   done
 fi
 

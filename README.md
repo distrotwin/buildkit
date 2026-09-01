@@ -77,7 +77,11 @@ submodule 钉 commit 是刻意的：升级 buildkit 是一次显式提交，不�
 
 源对境外出口偶发卡死（返回 200、`Content-Length` 正确、body 0 字节直到超时），但吞吐本身不差——实测 1.45 MB/s，比国内直连快得多。所以重试有效，不必自建镜像。
 
-但**收紧超时会制造新故障**。曾把 `Acquire::http::Timeout` 收到 45 秒，想让卡死的连接尽快进入重试；结果 27 MB 的 `Packages.gz` 在慢节点上拉不完，apt 转而回退到未压缩变体并撞上 404。症状是一个看起来百分之百属于源的 404，而真因是自己上一轮的缓解措施。**改超时之前先算清最大的单个文件在该超时内需要多少带宽。**
+**改超时之前先查清它的语义。** 这一条是踩了两次才写下的：`Acquire::http::Timeout` 是**不活动超时**而不是总传输时长上限——manpage 原文是 "this value applies to the connection as well as the data timeout"，只要数据在流就永远不触发，多大的文件都不会被它砍掉。
+
+我第一次按「总时长」建模，算出「27 MB 在 45 秒内需要 590 KB/s」，据此把它从 45 秒放到 180 秒；结果单个卡死的包最坏要耗 `180 × Retries` 秒，devel 档几百个包，作业一小时跑不完。两次调整都基于同一个错误模型，方向相反、各制造一个故障。
+
+正确的取值方式：`Timeout` 按「多久没有任何数据就判定卡死」来定（45 秒足够宽松），`Retries` 控制重试次数，两者相乘就是单个包的最坏耗时。curl 那边没有等价选项，用 `--speed-limit` 加 `--speed-time` 表达同一个意思，见 `lib/common.sh::fetch_exact`。
 
 重试要放在**档位级**而不是只靠 apt 自己的 `Acquire::Retries`：后者只覆盖单次 `apt-get update`，而每个档位都要重跑一遍完整的 update 加 download。
 

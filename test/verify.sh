@@ -56,6 +56,9 @@ declare -a XNOTES=()
 # 由汇总阶段按「全部镜像的项集合」减去本镜像已记录的项推出，不在这里编造。
 declare -a CHECKS=()
 _rec(){ CHECKS+=("$IMG|$1|$2"); }
+# 显式「不适用」：记录状态并给出理由。与「压根没跑到」区分开——后者在矩阵里
+# 同样显示为不适用，但那是推断出来的；这里是我们主动声明的，日志里有理由可查。
+skip(){ _rec "$1" na; XNOTES+=("  ⬜ $IMG $1 不适用：$2"); }
 _xfail_set() {
   local t; t=$(printf '%s' "${TIER:-}" | tr '[:lower:]' '[:upper:]')
   local extra; extra=$(eval "printf '%s' \"\${XFAIL_${t}:-}\"" 2>/dev/null || true)
@@ -316,8 +319,16 @@ for DID in $DISTROS; do
     esac
     fi
     # L3 ABI gate：低地板产物必须能跑；高地板产物按 glibc 判定
-    r=$(docker run --rm -v "$BK/gate:/g:ro" "$IMG" /g/t_low 2>&1 | tail -1)
-    check gate_low "ok 14" "$r"
+    # 低地板门禁不是每个架构都有：manylinux2014 只有 x86_64 与 aarch64，
+    # 而 LoongArch 最早的 glibc 就是 2.36，不存在「低于 2.17 的地板」这回事。
+    # build-gates.sh 会把这个事实写进 .gate-status，这里读它——
+    # 那个文件此前一直没人读，等于一个悬空机制。
+    if grep -q GATE_LOW_NA "$BK/gate/.gate-status" 2>/dev/null; then
+      skip gate_low "该架构没有低地板工具链（manylinux2014 无此架构，且其最早 glibc 已高于 2.17）"
+    else
+      r=$(docker run --rm -v "$BK/gate:/g:ro" "$IMG" /g/t_low 2>&1 | tail -1)
+      check gate_low "ok 14" "$r"
+    fi
     # 缺门禁二进制不能当作「这项不适用」而跳过——跳过时失败数仍是 0，
     # 汇总照样全绿，而这一整类 ABI 判定其实一次都没跑。
     if [ ! -f "$GATE_HIGH" ]; then

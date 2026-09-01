@@ -16,7 +16,10 @@
 """
 import argparse, json, pathlib, sys
 
-EMOJI = {"pass": "✅", "xpass": "✅", "xfail": "🟡", "fail": "❌", "warn": "⚠️"}
+# na 必须显式登记。不登记时它会 fallback 到「未记录」那一支，结果凑巧也是 ⬜，
+# 但那是巧合不是设计——一旦以后给 fallback 换个符号，声明过的不适用会跟着变，
+# 而两者的含义并不相同：一个是我们主动声明的，一个是推断出来的。
+EMOJI = {"pass": "✅", "xpass": "✅", "xfail": "🟡", "fail": "❌", "warn": "⚠️", "na": "⬜"}
 NA = "⬜"
 TIER_ORDER = {"micro": 0, "base": 1, "devel": 2}
 
@@ -60,7 +63,9 @@ def render_one(distro, rows):
     L.append("")
     L.append("总体：" + ("**✅ 全部通过**" if n_fail == 0 else f"**❌ 有 {n_fail} 项异常**"))
     L += ["", "## 能力矩阵", "",
-          "✅ 通过　🟡 期望不通过（XFAIL，不构成失败）　❌ 异常　⚠️ 警告　⬜ 不适用", ""]
+          "✅ 通过　🟡 期望不通过（XFAIL，不构成失败）　❌ 异常　⚠️ 警告　⬜ 不适用", "",
+          "「不适用」有两种来源：一是脚本主动声明的（理由见下方章节），"
+          "二是该项在这个镜像上根本没跑到（如 micro 档没有 apt）。两者在表里同为 ⬜。", ""]
 
     if not names:
         L += ["> 结果里没有逐项状态，无法出矩阵。", ""]

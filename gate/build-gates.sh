@@ -32,11 +32,29 @@ fi
 C="gatebuild-$$"
 trap 'docker rm -f "$C" >/dev/null 2>&1 || true' EXIT
 
+# 目标架构与宿主不同时必须交叉编译：门禁二进制要放进目标镜像里执行，
+# 按宿主架构编出来的塞进去只会得到 "exec ...: no such file or directory"，
+# 那句话看起来像文件缺失，实际是 ELF 的解释器对不上。
+HOST_ARCH=$(dpkg --print-architecture)
+TGT=${ARCH:-$HOST_ARCH}
+case "$TGT" in
+  loong64|loongarch64) XPFX=loongarch64-linux-gnu ;;
+  arm64)               XPFX=aarch64-linux-gnu ;;
+  armhf)               XPFX=arm-linux-gnueabihf ;;
+  *)                   XPFX="" ;;
+esac
+if [ "$TGT" = "$HOST_ARCH" ] || [ -z "$XPFX" ]; then
+  CXX=g++; PKG=g++
+else
+  CXX="${XPFX}-g++"; PKG="g++-${XPFX}"
+  echo "目标 $TGT 与宿主 $HOST_ARCH 不同，交叉编译：$CXX"
+fi
+
 docker run -d --name "$C" -e http_proxy= -e https_proxy= "$BUILDER_IMG" sleep 600 >/dev/null
-docker exec "$C" bash -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends g++ >/dev/null'
+docker exec "$C" bash -c "apt-get update -qq && apt-get install -y -qq --no-install-recommends $PKG >/dev/null"
 
 docker exec -i "$C" bash -c 'cat > /t.cpp' < "$ROOT/gate/t.cpp"   # -i 必须有，否则 stdin 不接、源文件是空的
-docker exec "$C" bash -c 'g++ -O2 -o /t_high /t.cpp'
+docker exec "$C" bash -c "$CXX -O2 -o /t_high /t.cpp"
 
 docker exec "$C" bash -c 'cat > /cxx.cpp <<CPP
 // std::to_chars 的浮点重载在 GCC 11 才落地，对应较高的 GLIBCXX 版本 ——
@@ -52,7 +70,7 @@ int main(){
   return 0;
 }
 CPP
-g++ -O2 -o /t_high_cxx /cxx.cpp'
+$CXX -O2 -o /t_high_cxx /cxx.cpp'
 
 for f in t_high t_high_cxx; do
   docker exec "$C" cat "/$f" > "$ROOT/gate/$f"
@@ -69,7 +87,7 @@ done
 # 只有 x86_64 与 aarch64 有 manylinux2014 镜像。LoongArch 的最早 glibc 就是 2.36，
 # 不存在「低地板」可言，此时跳过并明确说明——但**不能静默跳过**，
 # 调用方据此决定是把该架构的 gate_low 判为不适用，还是判为缺失。
-case "${ARCH:-$(dpkg --print-architecture)}" in
+case "$TGT" in
   amd64) ML=quay.io/pypa/manylinux2014_x86_64 ;;
   arm64) ML=quay.io/pypa/manylinux2014_aarch64 ;;
   *)     ML="" ;;

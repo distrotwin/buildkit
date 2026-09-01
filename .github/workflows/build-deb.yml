@@ -29,19 +29,27 @@ jobs:
 
       # submodule 钉的是脚本版本，uses: 钉的是本 workflow 的版本，两个 pin 各自独立。
       # 不绑死的话会出现「用新 workflow 跑旧脚本」这种谁都没察觉的组合。
-      # github.job_workflow_sha 正是本可复用 workflow 所在仓库的 commit。
+      #
+      # 不用 github.job_workflow_sha：实测它在这里是空串。拿未经校验的值去比较，
+      # 正是这道门禁本身要防的错——方向反过来写就会变成永真。改从调用方自己的
+      # workflow 文件里取，自包含且可验证，并且先断言两边都非空再比。
       - name: 核对 submodule 与 workflow 同版本
         run: |
           set -eu
           have=$(git -C buildkit rev-parse HEAD)
-          want="${{ github.job_workflow_sha }}"
+          want=$(grep -rhoE 'buildkit/\.github/workflows/[a-z-]+\.yml@[0-9a-f]{40}' .github/workflows/ \
+                 | grep -oE '[0-9a-f]{40}$' | sort -u)
+          n=$(printf '%s\n' "$want" | grep -c . || true)
+          [ -n "$have" ] || { echo "::error::取不到 submodule 的 commit"; exit 1; }
+          [ "$n" = "1" ] || {
+            echo "::error::调用方的 uses: 指向了 $n 个不同的 buildkit commit，无法判定应当用哪个"
+            printf '%s\n' "$want"; exit 1; }
           echo "submodule=$have"
           echo "workflow =$want"
           [ "$have" = "$want" ] || {
             echo "::error::buildkit submodule 与所调用 workflow 不是同一个 commit。"
             echo "::error::请把 submodule 更新到 $want，或把 uses: 指向 $have。"
-            exit 1
-          }
+            exit 1; }
 
       - name: 安装构建依赖
         run: |
@@ -85,6 +93,22 @@ jobs:
           echo "门禁二进制: $(ls -1 buildkit/gate/t_* 2>/dev/null | tr '\n' ' ')"
           cat buildkit/gate/.gate-status 2>/dev/null || echo "GATE_LOW_UNKNOWN=1"
           df -h / | tail -1
+
+      # 只有声明了坏包重打包或容器假包的版本才需要本地源。没有这两项时
+      # mk-localrepo 会因索引为空而失败，那是它的正确行为（空索引会让后面的 apt
+      # 报「包被 pin 到 -1 又没人 Provides」，报错指不到根因），所以这里按 conf 判断。
+      - name: 造本地源（仅需要的版本）
+        env:
+          ARCH: ${{ inputs.arch }}
+          ROOT: ${{ github.workspace }}
+        run: |
+          set -eu
+          . "./distros/${{ inputs.distro-id }}.conf"
+          if [ -n "${REPACK_DEBS:-}" ] || [ -n "${STUB_PROVIDES:-}" ]; then
+            sudo -E buildkit/tools/mk-localrepo.sh "${{ inputs.distro-id }}"
+          else
+            echo "${{ inputs.distro-id }} 无 REPACK_DEBS / STUB_PROVIDES，跳过本地源"
+          fi
 
       - name: 构建三档
         env:

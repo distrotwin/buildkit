@@ -187,7 +187,9 @@ jobs:
           ROOT: ${{ github.workspace }}
         run: |
           sudo -E buildkit/build/import.sh "${{ inputs.distro-id }}" ${{ inputs.tiers }}
-          sudo -E buildkit/test/verify.sh  "${{ inputs.distro-id }}"
+          # DISTROS 限定成本 job 建的那个版本：不限定的话 verify 会枚举全部 conf，
+          # 去查另外两个版本的镜像——它们在这个 job 里根本没建过。
+          sudo -E DISTROS="${{ inputs.distro-id }}" buildkit/test/verify.sh "${{ inputs.distro-id }}"
 
       # 校验通过才登录。顺序反过来的话，坏镜像也会先被推上去。
       - name: 登录 GHCR
@@ -208,7 +210,9 @@ jobs:
           # 日期取 UTC，与构建用的 SOURCE_DATE_EPOCH 同源，便于对账
           STAMP=$(date -u +%Y%m%d)
           for tier in ${{ inputs.tiers }}; do
-            SRC="${{ inputs.distro-id }}-$tier"
+            # 源镜像名取 conf 里的 IMAGE，与构建实际打的 tag 一致；
+            # 写成 "<did>-$tier" 会指向一个不存在的镜像。
+            SRC="$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' IMAGE):$tier"
             # 每档两个 tag：滚动的给人用，带日期的给 CI 钉死
             docker tag "$SRC" "$REG:$PFX-$tier-$ARCH"
             docker tag "$SRC" "$REG:$PFX-$tier-$ARCH-$STAMP"

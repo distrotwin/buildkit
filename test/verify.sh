@@ -31,6 +31,23 @@ fail(){ FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $*"); }
 # 发行版清单从 distros/*.conf 自动发现，避免与 Makefile / sbom.sh 三处各写一遍而漂移
 [ -n "${DISTROS:-}" ] && DISTROS_OVERRIDDEN=1
 DISTROS=${DISTROS:-$(ls "$ROOT"/distros/*.conf 2>/dev/null | xargs -r -n1 basename | sed 's/\.conf$//' | tr '\n' ' ')}
+
+# IMAGE 撞名守卫：两份 conf 用同一个本地 tag 时，构建会互相覆盖，而本脚本会
+# 拿各自的基线去量同一个镜像，表现是「期望 2.38 实际 2.31」这类看起来像构建
+# 错了的失败。实际踩过一次（三个麒麟版本都写 IMAGE=kylin），22 条失败全部由此
+# 而来，而每一条读起来都像真缺陷。
+_seen=""; _dup=""
+for _d in $DISTROS; do
+  _i=$(. "$ROOT/distros/$_d.conf" >/dev/null 2>&1; printf '%s' "${IMAGE:-}")
+  [ -n "$_i" ] || { echo "✗ distros/$_d.conf 没有 IMAGE" >&2; exit 2; }
+  case " $_seen " in *" $_i "*) _dup="$_dup $_i";; esac
+  _seen="$_seen $_i"
+done
+if [ -n "$_dup" ]; then
+  echo "✗ 多个 distros/*.conf 共用同一个 IMAGE:$_dup" >&2
+  echo "  本地 tag 必须按版本唯一，否则构建互相覆盖、基线交叉比对。" >&2
+  exit 2
+fi
 for DID in $DISTROS; do
   # conf 里的变量会跨发行版泄漏（IMMUTABLE 泄漏会把 apt_check/compile_cxx 静默降级成跳过），
   # 每轮开头必须清掉

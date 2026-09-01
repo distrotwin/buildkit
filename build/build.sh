@@ -20,23 +20,6 @@ log "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ($(date -u -d @$SOURCE_DATE_EPOCH 2>/d
 # 落盘供清单引用：epoch 是逐位复现的必要输入，不记下来 manifest 就兑现不了 report.md §8（可复现性） 的承诺
 mkdir -p "$ROOT/out"; printf '%s' "$SOURCE_DATE_EPOCH" > "$ROOT/out/$DID.epoch"
 
-# keyring 安置到 apt 的规范位置，并自证 _apt 能读到。
-# 缺这一步的表现是 apt 报 NO_PUBKEY 而 gpgv 同时报验签通过——两个结论矛盾时，
-# 差别在于读文件的用户是谁，不在 key 对不对。
-APT_KEYRING="/etc/apt/keyrings/$(basename "${KEYRING:-kylin-archive-keyring.gpg}")"
-prepare_apt_keyring() {
-  [ -f "$KEYRING" ] || die "keyring 不存在: $KEYRING"
-  install -d -m 755 /etc/apt/keyrings
-  install -m 644 "$KEYRING" "$APT_KEYRING"
-  if id _apt >/dev/null 2>&1; then
-    su -s /bin/sh _apt -c "test -r '$APT_KEYRING'" \
-      || die "keyring 落位后 _apt 仍读不到: $APT_KEYRING"
-    log "keyring 就位 $APT_KEYRING（_apt 可读）"
-  else
-    log "keyring 就位 $APT_KEYRING（本机无 _apt 用户，跳过读权自证）"
-  fi
-}
-
 EXC=(
  --dpkgopt=path-exclude=/usr/share/doc/*      --dpkgopt=path-include=/usr/share/doc/*/copyright
  --dpkgopt=path-exclude=/usr/share/man/*      --dpkgopt=path-exclude=/usr/share/info/*
@@ -57,16 +40,14 @@ build_mmdebstrap() {
   local HOOKS=()
   [ "${USRMERGE:-no}" = yes ] && HOOKS+=(--hook-dir=/usr/share/mmdebstrap/hooks/merged-usr)
   local OUT="$ROOT/out/$DID-$TIER.tar"
-  prepare_apt_keyring
   rm -f "$OUT"
   log "[$DID/$TIER] mmdebstrap variant=$variant"
-  # signed-by 走**宿主**路径。实测过：mmdebstrap 下 apt 按宿主路径解析，
-  # 写 chroot 内路径即使 setup-hook 已把文件拷进去，也照样报 NO_PUBKEY。
-  # 但不能直接指向仓库里的 keyring：apt 验签时降权到 _apt 用户，深埋在用户
-  # 目录下的路径它读不到，报出来同样是 NO_PUBKEY <指纹>——而那个指纹就在
-  # 文件里，很容易误判成信任根不对而去换 key。落到 apt 自己的规范位置最稳。
+  # signed-by 走宿主路径的 $KEYRING，与 osimg-study 里实证过的写法一致。
+  # 实测过两件事：apt 按宿主路径解析（写 chroot 内路径即使 setup-hook 已把文件
+  # 拷进去也报 NO_PUBKEY），以及 _apt 能读到深埋在用户目录下的 keyring
+  # （/home/runner/... 与 /etc/apt/keyrings/ 两处都可读、两处都能构建成功）。
   printf 'deb [trusted=yes] copy://%s/localrepo/%s ./\ndeb [signed-by=%s] %s %s %s\n' \
-      "$ROOT" "$DID" "$APT_KEYRING" "$MIRROR" "$SUITE" "$COMPONENTS" | \
+      "$ROOT" "$DID" "$KEYRING" "$MIRROR" "$SUITE" "$COMPONENTS" | \
   DID=$DID TIER=$TIER ROOT=$ROOT SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" mmdebstrap \
       --mode=root --architectures=$ARCH --format=tar --variant="$variant" \
       "${INC_ARG[@]}" \

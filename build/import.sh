@@ -3,8 +3,17 @@
 set -eu
 # 项目根：submodule 布局下脚本父目录是 buildkit 根，不是项目根，所以只能取调用方的 cwd
 ROOT=${ROOT:-$PWD}
-DID=$1; TIER=$2
+# 与 build.sh 同签名：import.sh <did> <tier...>。
+# 原先是 DID=$1; TIER=$2，多余的档位被静默忽略——调用方写
+# `import.sh v11 micro base devel` 时只导入了 micro，而 verify 随后报
+# 「kylin-v11:base 不存在」，看起来像构建没产出 base。
+# selfhost 路径在 build-selfhost.sh 里自己 docker import，不经过本脚本，
+# 于是这个缺陷被两条路径的差异藏了很久。
+DID=${1:?用法: import.sh <did> <tier...>}; shift
 . "$ROOT/distros/$DID.conf"
+
+import_one() {
+TIER=$1
 TAR="$ROOT/out/$DID-$TIER.tar"
 [ -s "$TAR" ] || { echo "缺 $TAR"; exit 1; }
 OPTS=(-c 'CMD ["/bin/bash"]' -c 'ENV LANG=C.UTF-8'
@@ -21,3 +30,6 @@ if tar tf "$TAR" 2>/dev/null | grep -qE '(usr/)?bin/systemctl$'; then
 fi
 docker import "${OPTS[@]}" "$TAR" "$IMAGE:$TIER" >/dev/null
 echo "  导入 $IMAGE:$TIER $(docker images "$IMAGE:$TIER" --format '{{.Size}}')"
+}
+
+for _t in "${@:-micro base devel}"; do import_one "$_t"; done

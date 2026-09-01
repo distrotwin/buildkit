@@ -20,7 +20,15 @@
 set -eu
 BK=${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}
 ROOT=$BK   # 门禁二进制属于 buildkit 自身，落在 $BK/gate/
+# 本地有 builder 镜像就用它，没有就回退到 debian:13。
+# builder 镜像本身就是 debian:13 加一批构建工具，而编门禁二进制只需要 g++，
+# 两者产出的 t_high 特征相同（GCC 14 / 需要 GLIBC_2.34）。
+# 测试阶段是干净机器、没有 builder 镜像，不该为了编两个小程序去重建整个 builder。
 BUILDER_IMG=${BUILDER_IMG:-dosbuild-cache:latest}
+if ! docker image inspect "$BUILDER_IMG" >/dev/null 2>&1; then
+  echo "本机无 $BUILDER_IMG，回退到 debian:13 编门禁二进制"
+  BUILDER_IMG=debian:13
+fi
 C="gatebuild-$$"
 trap 'docker rm -f "$C" >/dev/null 2>&1 || true' EXIT
 

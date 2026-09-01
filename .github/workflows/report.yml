@@ -1,8 +1,17 @@
-name: 阶段四 · 汇总测试报告
+name: 阶段三 · 汇总测试报告
 
+# 每个系统一份独立报告与一份独立 artifact。三个系统全挤进一个 markdown 时，
+# 列数逼近二十、要横向滚动才看得完，等于失去了「一眼看出哪里红了」的作用。
+#
+# 完整日志（成功的也留）一并打包：判断一个失败是不是回归，往往要跟上一次成功的
+# 输出逐行比；只留失败日志等于「出问题时才有线索」。
 on:
   workflow_call:
     inputs:
+      distros:
+        type: string
+        required: true
+        description: "空格分隔的系统列表，用于按系统切分 artifact"
       expected:
         type: number
         default: 0
@@ -10,7 +19,7 @@ on:
       baseline:
         type: number
         default: 0
-        description: "全部镜像的检查总数下限；0 不校验。防的是检查被静默跳过——拆成单镜像 job 后 verify.sh 里那道基线对子集失去意义，只能上移到这里"
+        description: "全部结果的检查总数下限；0 不校验"
 
 permissions:
   contents: read
@@ -21,22 +30,82 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
+
       - uses: actions/download-artifact@v4
         with:
           pattern: result-*
-          path: results
+          path: incoming
           merge-multiple: true
-      - name: 渲染报告
+
+      - name: 清点收到的东西
+        run: |
+          echo "结果文件："; find incoming -name '*.json' | sed 's/^/  /' || true
+          echo "日志文件："; find incoming -name '*.log' | sed 's/^/  /' || true
+
+      - name: 渲染每系统报告
+        id: render
         run: |
           set -eu
-          echo "收到的结果文件："
-          find results -name '*.json' | sed 's/^/  /' || true
-          python3 buildkit/tools/render-report.py results \
-            --baseline '${{ inputs.baseline }}' --expected '${{ inputs.expected }}' --out report.md
-          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          # 不用 set -e 吞掉退出码：渲染器用非零表示「有异常或守卫未过」，
+          # 而报告本身必须先写出来再决定成败，否则出事时连报告都没有。
+          rc=0
+          python3 buildkit/tools/render-report.py incoming \
+            --out-dir reports --expected '${{ inputs.expected }}' \
+            --baseline '${{ inputs.baseline }}' || rc=$?
+          cat reports/summary.md >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          for d in ${{ inputs.distros }}; do
+            [ -f "reports/report-$d.md" ] || continue
+            {
+              echo "<details><summary>$d 详细报告</summary>"; echo
+              cat "reports/report-$d.md"; echo; echo "</details>"; echo
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: 按系统打包报告与日志
+        run: |
+          set -eu
+          for d in ${{ inputs.distros }}; do
+            mkdir -p "bundle/$d"
+            [ -f "reports/report-$d.md" ] && cp "reports/report-$d.md" "bundle/$d/"
+            # 日志文件名形如 <did>-<arch>-<tier>.{verify,smoke}.log，按系统前缀归拢
+            find incoming -name "$d-*.log" -exec cp {} "bundle/$d/" \; 2>/dev/null || true
+            find incoming -name "$d-*.json" -exec cp {} "bundle/$d/" \; 2>/dev/null || true
+            echo "$d: $(ls -1 "bundle/$d" | wc -l) 个文件"
+          done
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-report
-          path: report.md
+          name: report-summary
+          path: reports/
           retention-days: 30
+
+      # 按系统分开的包：出问题时只下自己关心的那个，不必拖走全部
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-v4
+          path: bundle/v4/
+          retention-days: 30
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-v10sp1
+          path: bundle/v10sp1/
+          retention-days: 30
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-v11
+          path: bundle/v11/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: 按渲染结果定成败
+        run: |
+          [ "${{ steps.render.outputs.rc }}" = "0" ] \
+            || { echo "::error::报告显示有异常或汇总守卫未过，详见上方 summary 与 artifact"; exit 1; }

@@ -48,6 +48,12 @@ jobs:
           out=$(docker run --rm "$IMG" /bin/bash -c 'echo SMOKE_OK; echo $MACHTYPE' 2>&1) || {
             echo "::error::镜像起不来: $out"; exit 1; }
           printf '%s\n' "$out" | sed 's/^/  /'
+          mkdir -p logs
+          {
+            echo "=== 镜像 $IMG ==="
+            docker image inspect "$IMG" --format '大小 {{.Size}} 字节  架构 {{.Architecture}}  创建 {{.Created}}' || true
+            echo "=== 冒烟输出 ==="; printf '%s\n' "$out"
+          } > "logs/${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}.smoke.log"
           printf '%s' "$out" | grep -q SMOKE_OK || { echo "::error::启动了但没有预期输出"; exit 1; }
 
       - name: 编门禁二进制
@@ -58,16 +64,26 @@ jobs:
         env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
         run: |
           set -eu
+          ID='${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}'
+          mkdir -p "$ROOT/logs"
+          # 成功的日志同样留下。只留失败的那份，等于「出问题时才有线索」——
+          # 而判断一个失败是不是回归，往往需要跟上一次成功的输出逐行比。
+          # set -o pipefail 是必须的：不加的话退出码取自 tee，检查失败会被吞掉。
+          set -o pipefail
           sudo -E ARCH="$ARCH" \
             DISTROS='${{ inputs.distro-id }}' TIERS='${{ inputs.tier }}' \
-            RESULT_JSON="$ROOT/results/${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}.json" \
-            buildkit/test/verify.sh '${{ inputs.distro-id }}'
+            RESULT_JSON="$ROOT/results/$ID.json" \
+            buildkit/test/verify.sh '${{ inputs.distro-id }}' 2>&1 | tee "$ROOT/logs/$ID.verify.log"
 
       # 失败也要把结果交上去，否则报告里这一格是空白，分不清「没跑」和「跑挂了」
+      # 结果与日志一起交。失败也要交，否则报告里这一格是空白，
+      # 分不清「没跑」和「跑挂了」。
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: result-${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}
-          path: results/
+          path: |
+            results/
+            logs/
           retention-days: 7
           if-no-files-found: warn

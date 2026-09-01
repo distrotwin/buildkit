@@ -19,16 +19,17 @@ check(){ # name expect actual [warn]
     if is_xfail "$n"; then
       XPASS_HITS=$((XPASS_HITS+1))
       XNOTES+=("  ⚑ $IMG $n 列在 XFAIL 里却通过了（实际 $a）—— 该例外可以收回")
+      PASS=$((PASS+1)); _rec "$n" xpass; return 0
     fi
-    PASS=$((PASS+1)); return 0
+    PASS=$((PASS+1)); _rec "$n" pass; return 0
   fi
   if is_xfail "$n"; then
     XFAIL_HITS=$((XFAIL_HITS+1))
     XNOTES+=("  ○ $IMG $n: 期望 $e 实际 $a （XFAIL，已知且预期）")
-    return 1
+    _rec "$n" xfail; return 1
   fi
-  if [ "$lvl" = warn ]; then WARN=$((WARN+1)); PROBLEMS+=("  ⚠ $IMG $n: 期望 $e 实际 $a"); else
-    FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $n: 期望 $e 实际 $a"); fi
+  if [ "$lvl" = warn ]; then WARN=$((WARN+1)); PROBLEMS+=("  ⚠ $IMG $n: 期望 $e 实际 $a"); _rec "$n" warn; else
+    FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $n: 期望 $e 实际 $a"); _rec "$n" fail; fi
   return 1
 }
 
@@ -49,6 +50,12 @@ check(){ # name expect actual [warn]
 # xpass 不判失败，但必须出现在报告里让人回来删。
 XFAIL_HITS=0; XPASS_HITS=0
 declare -a XNOTES=()
+# 逐检查项的状态，供汇总阶段画能力矩阵。只有汇总数画不出矩阵——
+# 「哪一项在哪个镜像上是什么状态」是四态图的基本单位。
+# 状态取值：pass / fail / xfail / warn。某个镜像上压根没跑的项在图上是「不适用」，
+# 由汇总阶段按「全部镜像的项集合」减去本镜像已记录的项推出，不在这里编造。
+declare -a CHECKS=()
+_rec(){ CHECKS+=("$IMG|$1|$2"); }
 _xfail_set() {
   local t; t=$(printf '%s' "${TIER:-}" | tr '[:lower:]' '[:upper:]')
   local extra; extra=$(eval "printf '%s' \"\${XFAIL_${t}:-}\"" 2>/dev/null || true)
@@ -65,18 +72,18 @@ pass(){
   if is_xfail "$n"; then
     XPASS_HITS=$((XPASS_HITS+1))
     XNOTES+=("  ⚑ $IMG $n 列在 XFAIL 里却通过了 —— 该例外可以收回")
-    PASS=$((PASS+1)); return 0
+    PASS=$((PASS+1)); _rec "$n" xpass; return 0
   fi
-  PASS=$((PASS+1));
+  PASS=$((PASS+1)); _rec "$n" pass
 }
 fail(){
   local n=${1%% *}
   if is_xfail "$n"; then
     XFAIL_HITS=$((XFAIL_HITS+1))
     XNOTES+=("  ○ $IMG $* （XFAIL，已知且预期）")
-    return 0
+    _rec "$n" xfail; return 0
   fi
-  FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $*")
+  FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG $*"); _rec "$n" fail
 }
 
 # 发行版清单从 distros/*.conf 自动发现，避免与 Makefile / sbom.sh 三处各写一遍而漂移
@@ -426,6 +433,16 @@ if [ -n "${RESULT_JSON:-}" ]; then
       [ "$_first" = 1 ] || printf ','
       _first=0
       printf '%s' "$_p" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()),end="")'
+    done
+    printf '],"checks":['
+    _first=1
+    for _c in "${CHECKS[@]:-}"; do
+      [ -n "$_c" ] || continue
+      [ "$_first" = 1 ] || printf ','
+      _first=0
+      printf '%s' "$_c" | python3 -c 'import sys,json
+img,name,st=sys.stdin.read().strip().split("|",2)
+print(json.dumps({"image":img,"name":name,"state":st},ensure_ascii=False),end="")'
     done
     printf '],"xnotes":['
     _first=1

@@ -13,6 +13,7 @@ on:
       arch:      { type: string, required: true }
       tier:      { type: string, required: true }
       runner:    { type: string, required: true }
+      needs-qemu: { type: boolean, default: false, description: "非原生架构置 true。测试阶段同样要 docker run 被测镜像，binfmt 这个前提两个阶段各需要一次" }
 
 permissions:
   contents: read
@@ -28,6 +29,29 @@ jobs:
         with:
           name: img-${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}
           path: ship
+
+      # 构建阶段装过 QEMU 不等于测试阶段也有——两个阶段是两台机器。
+      # 缺了的表现是冒烟步骤报「镜像起不来」，而那句话对「架构不能执行」和
+      # 「镜像本身坏了」不加区分，容易被当成镜像的问题。
+      - name: 安装 QEMU 用户态模拟
+        if: inputs.needs-qemu
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-user-static binfmt-support
+          echo "qemu-user-static: $(dpkg-query -W -f='${Version}' qemu-user-static)"
+          case "${{ inputs.arch }}" in
+            loong64|loongarch64) NEED=qemu-loongarch64 ;;
+            arm64)               NEED=qemu-aarch64 ;;
+            armhf)               NEED=qemu-arm ;;
+            mips64el)            NEED=qemu-mips64el ;;
+            *)                   NEED="" ;;
+          esac
+          if [ -n "$NEED" ] && [ ! -e "/proc/sys/fs/binfmt_misc/$NEED" ]; then
+            echo "::error::binfmt 缺少 $NEED，无法运行 ${{ inputs.arch }} 镜像。"
+            echo "::error::LoongArch 需要 QEMU 7.1 以上，Ubuntu 22.04 只带 6.2，请改用更新的 runner。"
+            exit 1
+          fi
 
       - name: 装载镜像
         run: |

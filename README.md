@@ -54,6 +54,10 @@ syscall 79 与 80 是通用 Linux ABI 的 `newfstatat` 与 `fstat`。LoongArch �
 
 需要模拟时，**宿主 `apt install qemu-user-static binfmt-support` 就够了**。不要引入 `tonistiigi/binfmt` 容器——实测它会破坏本来可用的 binfmt 注册，而且失效的真因往往是空实例遮蔽，不是宿主缺包。
 
+**但要核对 QEMU 版本够不够新。** LoongArch 的用户态模拟是 QEMU 7.1 才加的，Ubuntu 22.04 只带 6.2，装完 `qemu-user-static` 后 binfmt 里依然没有 `qemu-loongarch64` 条目。这一点踩过：在一台 QEMU 8.2.2 的机器上做完 smoke test，把结论套到 22.04 的 runner 上，三次 mmdebstrap 重试之后才等到 `E: loong64 can neither be executed natively nor via qemu user emulation`——那句话不提版本，很容易被当成 binfmt 没装。
+
+因此 `build-one.yml` 在装完 qemu 后会按目标架构核对对应的 binfmt 条目，缺了当场失败并打印实际版本。LoongArch 的 job 用 `ubuntu-24.04` 而不是照惯例取最低版本：产物是 loong64 的，与宿主发行版新旧无关，而宿主必须能模拟目标架构。
+
 ## CI 分两个阶段
 
 ```

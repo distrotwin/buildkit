@@ -11,7 +11,12 @@
 # t_low 需要 manylinux2014 镜像，本机离线环境下拉不到，所以**不在本脚本里重建**，
 # 仅记录其来源与实测符号天花板（见 report.md §3.1（信任根））。要重建请在有外网的机器上执行：
 #   docker run --rm -v $PWD:/w quay.io/pypa/manylinux2014_x86_64 \
-#     g++ -O2 -static-libstdc++ -static-libgcc -o /w/t_low /w/t.cpp
+#     g++ -O2 -pthread -static-libstdc++ -static-libgcc -o /w/t_low /w/t.cpp
+#
+# -pthread 是必须的：t.cpp 用了 std::thread，而 glibc 直到 2.34 才把 pthread_create
+# 并入 libc。manylinux2014 是 glibc 2.17，不给 -pthread 就是一串
+# undefined reference to `pthread_create`。Debian 13 上反而不需要，
+# 所以 t_high 编得过、t_low 编不过——这条注释原先给的命令从未被验证过。
 set -eu
 BK=${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}
 ROOT=$BK   # 门禁二进制属于 buildkit 自身，落在 $BK/gate/
@@ -66,7 +71,7 @@ if [ -z "$ML" ]; then
   echo "GATE_LOW_NA=1" > "$BK/gate/.gate-status"
 else
   docker run --rm -v "$BK/gate:/g" -e http_proxy= -e https_proxy= "$ML" \
-    g++ -O2 -static-libstdc++ -static-libgcc -o /g/t_low /g/t.cpp
+    g++ -O2 -pthread -static-libstdc++ -static-libgcc -o /g/t_low /g/t.cpp
   chmod +x "$BK/gate/t_low"
   printf '%-12s GLIBC<=%s  GLIBCXX<=%s\n' t_low \
     "$(objdump -T "$BK/gate/t_low" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)" \

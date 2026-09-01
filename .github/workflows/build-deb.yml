@@ -51,6 +51,26 @@ jobs:
             echo "::error::请把 submodule 更新到 $want，或把 uses: 指向 $have。"
             exit 1; }
 
+      # 麒麟/统信的归档站都在国内，没有全球 CDN 迹象，境外 runner 能否访问是未知项。
+      # 放在最前面探一次：不通的话 30 秒内就报出来，而不是等 setup 走完五分钟后
+      # 死在 debootstrap 里、报错还指向别处。
+      - name: 探源可达性
+        env:
+          ROOT: ${{ github.workspace }}
+        run: |
+          set -eu
+          . "./distros/${{ inputs.distro-id }}.conf"
+          U="${MIRROR%/}/dists/$SUITE/Release"
+          echo "探测 $U"
+          code=$(curl -s -o /tmp/rel -w '%{http_code}' --max-time 60 "$U" || echo 000)
+          size=$(stat -c%s /tmp/rel 2>/dev/null || echo 0)
+          echo "HTTP $code，落地 $size 字节"
+          [ "$code" = "200" ] && [ "$size" -gt 200 ] || {
+            echo "::error::软件源从本 runner 不可达（HTTP $code，$size 字节）。"
+            echo "::error::这台 runner 在境外，而该归档站可能仅面向国内。需要自建镜像或改用国内 runner。"
+            exit 1; }
+          grep -iE '^(Origin|Label|Suite|Date|Architectures)' /tmp/rel | sed 's/^/  /'
+
       - name: 安装构建依赖
         run: |
           sudo apt-get update

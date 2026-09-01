@@ -1,9 +1,15 @@
 #!/bin/bash
 # 全量验收：对每个镜像跑结构/完整性/能力/ABI-gate 检查，并与 distros/*.conf 的预期基线对账
+# BK = buildkit 自身的根（lib/build/test/tools/gate 在这里）
+# ROOT = 项目根（distros/out/localrepo/keys 在这里）
+# submodule 布局下两者不是同一个目录，混用会在「找得到 conf 却找不到 common.sh」
+# 这种地方失败，报错离真因很远。
+BK="${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
 set -u
-ROOT=${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}   # 默认取仓库根，换机器无需改脚本
-GATE_BIN=$ROOT/gate/t_low          # manylinux2014 编的低地板产物（GLIBC_2.14/GLIBCXX_3.4.11）
-GATE_HIGH=$ROOT/gate/t_high        # Debian13 编的高地板产物（GLIBC_2.34）
+# 项目根：submodule 布局下脚本父目录是 buildkit 根，不是项目根，所以只能取调用方的 cwd
+ROOT=${ROOT:-$PWD}
+GATE_BIN=$BK/gate/t_low          # manylinux2014 编的低地板产物（GLIBC_2.14/GLIBCXX_3.4.11）
+GATE_HIGH=$BK/gate/t_high        # Debian13 编的高地板产物（GLIBC_2.34）
 PASS=0; FAIL=0; WARN=0
 declare -a PROBLEMS=()
 
@@ -41,7 +47,7 @@ for DID in $DISTROS; do
     IMG="$IMAGE:$TIER"
     docker image inspect "$IMG" >/dev/null 2>&1 || { echo "  ✗ $IMG 不存在"; FAIL=$((FAIL+1)); continue; }
     out=$(docker run --rm -e http_proxy= -e https_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= \
-            -v "$ROOT/test/inner-checks.sh:/checks.sh:ro" "$IMG" /bin/bash /checks.sh 2>/dev/null)
+            -v "$BK/test/inner-checks.sh:/checks.sh:ro" "$IMG" /bin/bash /checks.sh 2>/dev/null)
     g(){ printf '%s' "$out" | awk -F= -v k="$1" '$1==k{print $2; exit}'; }
     echo "── $IMG  ($(docker images "$IMG" --format '{{.Size}}'))  $(g os_name)  包=$(g pkgs)"
 
@@ -215,10 +221,14 @@ for DID in $DISTROS; do
     esac
     fi
     # L3 ABI gate：低地板产物必须能跑；高地板产物按 glibc 判定
-    r=$(docker run --rm -v "$ROOT/gate:/g:ro" "$IMG" /g/t_low 2>&1 | tail -1)
+    r=$(docker run --rm -v "$BK/gate:/g:ro" "$IMG" /g/t_low 2>&1 | tail -1)
     check gate_low "ok 14" "$r"
-    if [ -f "$GATE_HIGH" ]; then
-      r2=$(docker run --rm -v "$ROOT/gate:/g:ro" "$IMG" /g/t_high 2>&1 | tail -1)
+    # 缺门禁二进制不能当作「这项不适用」而跳过——跳过时失败数仍是 0，
+    # 汇总照样全绿，而这一整类 ABI 判定其实一次都没跑。
+    if [ ! -f "$GATE_HIGH" ]; then
+      FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG gate_high 门禁二进制缺失（$GATE_HIGH），该项未被检验")
+    else
+      r2=$(docker run --rm -v "$BK/gate:/g:ro" "$IMG" /g/t_high 2>&1 | tail -1)
       major=$(printf '%s' "$EXPECT_GLIBC" | cut -d. -f2)
       if [ "$major" -ge 34 ]; then check gate_high "ok 14" "$r2"
       else
@@ -237,9 +247,13 @@ for DID in $DISTROS; do
     # L3b C++ ABI 高地板：t_high_cxx 需要较高的 GLIBCXX（用 std::to_chars 浮点重载）。
     # 原先只有 GLIBC 的高低地板，GLIBCXX 方向压根没有负向门禁 —— t_high 只需要
     # GLIBCXX_3.4.22，三个发行版都满足，等于没测。
-    if [ -f "$ROOT/gate/t_high_cxx" ] && [ "$(g compile_cxx)" != n/a ]; then
-      r3=$(docker run --rm -v "$ROOT/gate:/g:ro" "$IMG" /g/t_high_cxx 2>&1 | tail -1)
-      cxxneed=$(objdump -T "$ROOT/gate/t_high_cxx" 2>/dev/null \
+    if [ ! -f "$BK/gate/t_high_cxx" ]; then
+      FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG gate_high_cxx 门禁二进制缺失，该项未被检验")
+    elif [ "$(g compile_cxx)" = n/a ]; then
+      : # 该档位无 C++ 编译能力，此项确实不适用（micro 档），不计失败
+    else
+      r3=$(docker run --rm -v "$BK/gate:/g:ro" "$IMG" /g/t_high_cxx 2>&1 | tail -1)
+      cxxneed=$(objdump -T "$BK/gate/t_high_cxx" 2>/dev/null \
                 | grep -oE 'GLIBCXX_[0-9.]+' | sort -V | tail -1 | sed 's/GLIBCXX_//')
       have=${EXPECT_GLIBCXX:-0}
       # 版本比较用 sort -V，别用字符串比较（3.4.9 vs 3.4.28）

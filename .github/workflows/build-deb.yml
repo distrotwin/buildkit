@@ -58,10 +58,32 @@ jobs:
           echo "── 已注册的 binfmt 条目 ──"
           ls /proc/sys/fs/binfmt_misc/ | head -40
 
+      # selfhost 路径在一个 debian:13 容器里跑 debootstrap 第一阶段（宿主 dpkg 版本
+      # 太新，写出的 status 目标系统读不了）。同一个镜像也用来编门禁二进制。
+      - name: 起 builder 容器
+        run: |
+          set -eu
+          docker build -q --build-arg http_proxy= --build-arg https_proxy= \
+            -f buildkit/Dockerfile.builder -t dosbuild-cache:latest buildkit/
+          docker run -d --name dosb --privileged --init \
+            -v "${{ github.workspace }}:/w" \
+            -e DEBIAN_FRONTEND=noninteractive -e http_proxy= -e https_proxy= \
+            dosbuild-cache:latest sleep infinity
+          docker exec dosb bash -c 'ls -d /w/distros /w/buildkit/lib' # 挂载布局自检
+
+      # 门禁二进制是架构相关的，必须在目标架构上现编，不能提交进仓库。
+      # 缺了它们 verify.sh 会把对应 ABI 判定记为失败而不是跳过——这是有意的。
+      - name: 编门禁二进制
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: sudo -E ARCH="$ARCH" buildkit/gate/build-gates.sh
+
       - name: 记录构建环境
         run: |
           echo "arch=${{ inputs.arch }}  runner=$(uname -m)  内核=$(uname -r)"
           echo "宿主 dpkg=$(dpkg --version | head -1)"
+          echo "门禁二进制: $(ls -1 buildkit/gate/t_* 2>/dev/null | tr '\n' ' ')"
+          cat buildkit/gate/.gate-status 2>/dev/null || echo "GATE_LOW_UNKNOWN=1"
           df -h / | tail -1
 
       - name: 构建三档

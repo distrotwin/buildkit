@@ -11,7 +11,10 @@
 # 因此走两阶段自举：debootstrap --foreign 只解包（不跑脚本）-> 导入容器 ->
 # 用**麒麟自己的 dpkg 1.19.7** 完成 configure。这是发行版工具链代差的标准解法。
 set -eu
-ROOT_HOST=${ROOT_HOST:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}   # 默认取仓库根
+BK_HOST=${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}      # buildkit 根
+ROOT_HOST=${ROOT_HOST:-${ROOT:-$PWD}}                                    # 项目根（distros/keys/out 在这里）
+# 容器内固定把项目根挂在 /w，于是 buildkit 自然位于 /w/buildkit
+CROOT=/w; CBK=$CROOT/buildkit
 BUILDER=${BUILDER:-dosb}
 # DID 可由环境变量指定：这条两阶段自举路径最初只为 kylin10 写，后来凝思也要用
 # （同一根因：目标发行版的 dpkg 在新版 builder 上跑 chroot 内配置会失败——
@@ -27,7 +30,7 @@ for _t in $TIERS; do
     *) echo "!! 无效档位 '$_t'（只接受 micro/base/devel；本脚本的 DID 由环境变量给（当前 $DID），档位参数只接受 micro/base/devel）" >&2; exit 2 ;;
   esac
 done
-STAGE=/w/build/$DID-stage
+STAGE=$CROOT/work/$DID-stage
 log(){ printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 # ── 阶段 0：独立验签（debootstrap 用 gpgv，能接受麒麟 key 的 SHA1 自签名）
@@ -36,7 +39,7 @@ log(){ printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 if [ "${NO_CHECK_GPG:-no}" = yes ]; then
   log "[$DID] 源为介质本地仓库，跳过 InRelease 验签（完整性锚点是 ISO 的官方校验值）"
 else
-  docker exec "$BUILDER" bash -c "unset http_proxy https_proxy; ROOT=/w . /w/lib/common.sh; verify_repo_signature '${MIRROR%/}' '$SUITE'" || exit 1
+  docker exec "$BUILDER" bash -c "unset http_proxy https_proxy; ROOT=$CROOT BK=$CBK . $CBK/lib/common.sh; verify_repo_signature '${MIRROR%/}' '$SUITE'" || exit 1
 fi
 
 # ── 阶段 1：--foreign 纯解包
@@ -58,11 +61,11 @@ fi
 # --exclude 那行都不打印（整个阶段 1 被跳过）。漏一个输入等于把「改了配置」
 # 静默降级成「什么都没改」，而且不报错，最容易让人去怀疑修法本身。
 STAGE_FP=$(printf '%s|%s|%s|%s|%s|%s' "$MIRROR" "$SUITE" "$COMPONENTS" "${STAGE_INCLUDE:-}" "${PIN_NEVER:-}" "$KEYRING_FP" | sha256sum | cut -c1-16)
-if [ "$(cat "$ROOT_HOST/build/$DID-stage/.foreign-done" 2>/dev/null)" != "$STAGE_FP" ]; then
+if [ "$(cat "$ROOT_HOST/work/$DID-stage/.foreign-done" 2>/dev/null)" != "$STAGE_FP" ]; then
   if [ "${NO_CHECK_GPG:-no}" = yes ]; then
     DB_GPG_ARG="--no-check-gpg"
   else
-    DB_GPG_ARG="--keyring=/w/keys/$(basename "${KEYRING:-keys/kylin-archive-keyring.gpg}")"
+    DB_GPG_ARG="--keyring=$CROOT/keys/$(basename "${KEYRING:-keys/kylin-archive-keyring.gpg}")"
   fi
   # PIN_NEVER 的包要在**入口**拦。此前的做法是过滤缓存安装，但这两个包其实是
   # debootstrap 的 base 集带进来的，过滤缓存拦不住；而事后 `dpkg --purge
@@ -96,7 +99,7 @@ fi
 
 # ── 阶段 2：导入容器，用麒麟自己的 dpkg 自举 configure
 log "[$DID] 阶段2: 打包 stage 并导入"
-docker exec "$BUILDER" bash -c "cd $STAGE && tar --numeric-owner -cf /w/out/$DID-stage.tar --exclude=./.foreign-done ." || exit 1
+docker exec "$BUILDER" bash -c "cd $STAGE && tar --numeric-owner -cf $CROOT/out/$DID-stage.tar --exclude=./.foreign-done ." || exit 1
 docker import "$ROOT_HOST/out/$DID-stage.tar" "$IMAGE:_stage" >/dev/null
 
 for TIER in $TIERS; do
@@ -109,7 +112,7 @@ for TIER in $TIERS; do
   # 介质本地源是 file:///w/media/xx，容器里必须能读到那个路径，否则第三阶段
   # apt 取不到包，只报「以下档位包没装上」而不说为什么（实测踩过）。
   if [ -n "${MEDIA_DIR:-}" ]; then
-    MEDIA_MOUNT="-v $ROOT_HOST/media/$MEDIA_DIR:/w/media/$MEDIA_DIR:ro"
+    MEDIA_MOUNT="-v $ROOT_HOST/media/$MEDIA_DIR:$CROOT/media/$MEDIA_DIR:ro"
   else
     MEDIA_MOUNT=""
   fi
@@ -120,9 +123,9 @@ for TIER in $TIERS; do
     -e TIER="$TIER" -e PKGS="$PKGS" -e SUITE="$SUITE" -e MIRROR="$MIRROR" \
     -e COMPONENTS="$COMPONENTS" -e PIN_NEVER="${PIN_NEVER:-}" \
     -e NO_CHECK_GPG="${NO_CHECK_GPG:-no}" \
-    -v "$ROOT_HOST/build/selfhost-inner.sh:/inner.sh:ro" \
+    -v "$BK_HOST/build/selfhost-inner.sh:/inner.sh:ro" \
     -v "$ROOT_HOST/keys:/keys:ro" \
-    -v "$ROOT_HOST/lib:/dosbuild-lib:ro" \
+    -v "$BK_HOST/lib:/dosbuild-lib:ro" \
     -v "$ROOT_HOST/assets:/dosbuild-assets:ro" \
     -v "$ROOT_HOST/distros:/dosbuild-distros:ro" \
     ${MEDIA_MOUNT} \

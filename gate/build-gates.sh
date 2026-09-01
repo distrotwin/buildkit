@@ -13,7 +13,8 @@
 #   docker run --rm -v $PWD:/w quay.io/pypa/manylinux2014_x86_64 \
 #     g++ -O2 -static-libstdc++ -static-libgcc -o /w/t_low /w/t.cpp
 set -eu
-ROOT=${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}   # 默认取仓库根
+BK=${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}
+ROOT=$BK   # 门禁二进制属于 buildkit 自身，落在 $BK/gate/
 BUILDER_IMG=${BUILDER_IMG:-dosbuild-cache:latest}
 C="gatebuild-$$"
 trap 'docker rm -f "$C" >/dev/null 2>&1 || true' EXIT
@@ -47,3 +48,28 @@ for f in t_high t_high_cxx; do
     "$(objdump -T "$ROOT/gate/$f" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)" \
     "$(objdump -T "$ROOT/gate/$f" | grep -oE 'GLIBCXX_[0-9.]+' | sort -V | tail -1)"
 done
+
+# ── t_low：低地板产物。必须能在所有被试上跑起来，因此要用尽可能老的 glibc 编译。
+# manylinux2014 是 CentOS 7 / glibc 2.17，静态链接 libstdc++ 与 libgcc 之后，
+# 产物的动态符号需求降到 GLIBC_2.14 附近。
+#
+# 只有 x86_64 与 aarch64 有 manylinux2014 镜像。LoongArch 的最早 glibc 就是 2.36，
+# 不存在「低地板」可言，此时跳过并明确说明——但**不能静默跳过**，
+# 调用方据此决定是把该架构的 gate_low 判为不适用，还是判为缺失。
+case "${ARCH:-$(dpkg --print-architecture)}" in
+  amd64) ML=quay.io/pypa/manylinux2014_x86_64 ;;
+  arm64) ML=quay.io/pypa/manylinux2014_aarch64 ;;
+  *)     ML="" ;;
+esac
+if [ -z "$ML" ]; then
+  echo "t_low       跳过：架构 ${ARCH:-?} 没有 manylinux2014 镜像，不存在低于 2.17 的地板"
+  echo "GATE_LOW_NA=1" > "$BK/gate/.gate-status"
+else
+  docker run --rm -v "$BK/gate:/g" -e http_proxy= -e https_proxy= "$ML" \
+    g++ -O2 -static-libstdc++ -static-libgcc -o /g/t_low /g/t.cpp
+  chmod +x "$BK/gate/t_low"
+  printf '%-12s GLIBC<=%s  GLIBCXX<=%s\n' t_low \
+    "$(objdump -T "$BK/gate/t_low" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)" \
+    "$(objdump -T "$BK/gate/t_low" | grep -oE 'GLIBCXX_[0-9.]+' | sort -V | tail -1)"
+  echo "GATE_LOW_OK=1" > "$BK/gate/.gate-status"
+fi

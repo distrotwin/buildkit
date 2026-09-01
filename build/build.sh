@@ -1,7 +1,12 @@
 #!/bin/bash
 # 主入口：build.sh <distro-id> <tier...>   tier ∈ micro base devel
+# BK = buildkit 自身的根（lib/build/test/tools/gate 在这里）
+# ROOT = 项目根（distros/out/localrepo/keys 在这里）
+# submodule 布局下两者不是同一个目录，混用会在「找得到 conf 却找不到 common.sh」
+# 这种地方失败，报错离真因很远。
+BK="${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
 set -eu
-ROOT="${ROOT:-/w}"; . "$ROOT/lib/common.sh"
+ROOT="${ROOT:-/w}"; . "$BK/lib/common.sh"
 DID=${1:?用法: build.sh <distro-id> <tier...>}; shift
 . "$ROOT/distros/$DID.conf"
 TIERS=${*:-micro base devel}
@@ -47,8 +52,8 @@ build_mmdebstrap() {
       --aptopt='APT::Key::gpgvcommand "gpgv"' \
       --aptopt='Acquire::Languages "none"' \
       --aptopt='APT::Install-Recommends "false"' \
-      --setup-hook="ROOT=$ROOT DID=$DID $ROOT/build/setup.sh \"\$1\"" \
-      --customize-hook="ROOT=$ROOT DID=$DID TIER=$TIER $ROOT/build/customize.sh \"\$1\"" \
+      --setup-hook="ROOT=$ROOT DID=$DID $BK/build/setup.sh \"\$1\"" \
+      --customize-hook="ROOT=$ROOT DID=$DID TIER=$TIER $BK/build/customize.sh \"\$1\"" \
       "$SUITE" "$OUT" -
   [ -s "$OUT" ] || die "[$DID/$TIER] 无产物"
   log "[$DID/$TIER] 完成 $(du -h "$OUT"|cut -f1)"
@@ -68,10 +73,11 @@ build_slice() {
   if [ -n "$want" ] && [ "$(cat "$SRC_ROOTFS/.verified" 2>/dev/null)" != "$want" ]; then
     die "切片源指纹不符（期望 ${want:0:16}…）。跑 tools/prepare-slice-src.sh $DID 重建"
   fi
-  local D="$ROOT/build/$DID-$TIER" OUT="$ROOT/out/$DID-$TIER.tar"
+  # 生成的 rootfs 属于项目产物，不能落进 buildkit（那是 submodule，且会污染工作区）
+  local D="$ROOT/work/$DID-$TIER" OUT="$ROOT/out/$DID-$TIER.tar"
   rm -rf "$D"; rm -f "$OUT"
   log "[$DID/$TIER] 切片"
-  python3 "$ROOT/tools/slice.py" "$SRC_ROOTFS" "$D" "$seeds"
+  python3 "$BK/tools/slice.py" "$SRC_ROOTFS" "$D" "$seeds"
   # postinst 生成物 + 配置：切片不跑脚本，从源 rootfs 直接取
   local f d
   for f in etc/passwd etc/group etc/shadow etc/gshadow etc/nsswitch.conf etc/host.conf \
@@ -93,7 +99,7 @@ build_slice() {
     fi
   done
   # 补回 update-alternatives 建的符号链接（不属于任何包，切片必漏）
-  python3 "$ROOT/tools/restore-alternatives.py" "$SRC_ROOTFS" "$D"
+  python3 "$BK/tools/restore-alternatives.py" "$SRC_ROOTFS" "$D"
   # ⚠️ 顺序要紧：厂商的 sources.list.d 必须在 adapt_container **之前**拷进去 ——
   # adapt_container 里要把两个返回 401 的授权源注释掉，文件还不存在的话那段就空跑
   # （我就这么把它空跑过一次，改完源清单毫无变化）。
@@ -187,8 +193,8 @@ build_debmedia() {
       --skip=chroot/policy-rc.d \
       --aptopt='Acquire::Languages "none"' \
       --aptopt='APT::Install-Recommends "false"' \
-      --setup-hook="ROOT=$ROOT DID=$DID $ROOT/build/setup.sh \"\$1\"" \
-      --customize-hook="ROOT=$ROOT DID=$DID TIER=$TIER $ROOT/build/customize.sh \"\$1\"" \
+      --setup-hook="ROOT=$ROOT DID=$DID $BK/build/setup.sh \"\$1\"" \
+      --customize-hook="ROOT=$ROOT DID=$DID TIER=$TIER $BK/build/customize.sh \"\$1\"" \
       "$SUITE" "$OUT" -
   [ -s "$OUT" ] || die "[$DID/$TIER] 产物为空"
 }
@@ -206,11 +212,11 @@ build_rpmmedia() {
   esac
   local MEDIA="$ROOT/media/$MEDIA_DIR"
   [ -d "$MEDIA/repodata" ] || die "介质仓库不存在: $MEDIA/repodata"
-  local D="$ROOT/build/$DID-$TIER"
+  local D="$ROOT/work/$DID-$TIER"
   rm -rf "$D"; mkdir -p "$D"
   log "[$DID/$TIER] rpmmedia 从介质仓库装包"
   RPM_DB_BACKEND="${RPM_DB_BACKEND:-}" \
-    python3 "$ROOT/tools/rpmmedia.py" "$MEDIA" "$D" "$seeds" || die "[$DID/$TIER] rpmmedia 失败"
+    python3 "$BK/tools/rpmmedia.py" "$MEDIA" "$D" "$seeds" || die "[$DID/$TIER] rpmmedia 失败"
   # adapt_container 的签名是 (rootfs, sources.list 内容, distro-id)。
   # rpm 系没有 apt sources.list，第二个参数传空 —— 那段逻辑里的 `if [ -n "$SRCLIST" ]`
   # 会正确走到「micro 档写空文件」那一支，不会留下 bootstrap 期的宿主路径。

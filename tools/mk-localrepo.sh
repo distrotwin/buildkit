@@ -1,7 +1,12 @@
 #!/bin/bash
 # 造本地源：① 重打包厂商坏包（去掉伪造依赖）② 造容器假包满足内核侧依赖
+# BK = buildkit 自身的根（lib/build/test/tools/gate 在这里）
+# ROOT = 项目根（distros/out/localrepo/keys 在这里）
+# submodule 布局下两者不是同一个目录，混用会在「找得到 conf 却找不到 common.sh」
+# 这种地方失败，报错离真因很远。
+BK="${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
 set -eu
-ROOT="${ROOT:-/w}"; . "$ROOT/lib/common.sh"
+ROOT="${ROOT:-/w}"; . "$BK/lib/common.sh"
 DID=$1
 . "$ROOT/distros/$DID.conf"
 # 与主构建用同一个 epoch，否则重打包的 deb 时间戳不一致，最终产物哈希会漂

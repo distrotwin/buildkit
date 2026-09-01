@@ -9,9 +9,11 @@ ARG https_proxy=""
 ARG HTTP_PROXY=""
 ARG HTTPS_PROXY=""
 ARG no_proxy="*"
+# apt 镜像站可覆盖：本地构建用国内镜像，CI 在境外用官方源反而快
+ARG APT_MIRROR="http://deb.debian.org/debian"
 ENV DEBIAN_FRONTEND=noninteractive
 RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.sources && \
-    printf 'Types: deb\nURIs: http://mirrors.aliyun.com/debian\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
+    printf 'Types: deb\nURIs: '"$APT_MIRROR"'\nSuites: trixie trixie-updates\nComponents: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.gpg\n' \
       > /etc/apt/sources.list.d/debian.sources && \
     printf 'Acquire::Languages "none";\n' > /etc/apt/apt.conf.d/no-lang && \
     apt-get update -qq && \

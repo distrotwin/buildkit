@@ -5,6 +5,11 @@
 # 会挂死 —— CPU 归零、dpkg 变僵尸、mmdebstrap 永不返回，等 20 分钟也不报错。
 # 这与 kylin10 那个「宿主 dpkg 1.22 写的 status，目标 dpkg 1.19.7 解析不了」同族
 # （见 report §4.2 缺陷 D07）。挂死必须变成有界失败，否则构建链会静默停住。
+# BK = buildkit 自身的根（lib/build/test/tools/gate 在这里）
+# ROOT = 项目根（distros/out/localrepo/keys 在这里）
+# submodule 布局下两者不是同一个目录，混用会在「找得到 conf 却找不到 common.sh」
+# 这种地方失败，报错离真因很远。
+BK="${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
 CT() {  # CT <秒> <rootfs> <sh -c 的命令>
   local secs=$1 root=$2; shift 2
   timeout -k 5 "$secs" chroot "$root" /bin/sh -c "$*"
@@ -15,7 +20,7 @@ CT() {  # CT <秒> <rootfs> <sh -c 的命令>
 # mmdebstrap --customize-hook：$1 = rootfs 路径（宿主侧）
 # 环境: ROOT DID TIER
 set -eu
-ROOT="${ROOT:-/w}"; . "$ROOT/lib/common.sh"
+ROOT="${ROOT:-/w}"; . "$BK/lib/common.sh"
 R=$1; DID="${DID:?}"; TIER="${TIER:?}"
 . "$ROOT/distros/$DID.conf"
 ADM="${ADMINDIR:-var/lib/dpkg}"

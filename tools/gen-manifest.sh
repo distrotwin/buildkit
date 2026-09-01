@@ -1,7 +1,8 @@
 #!/bin/bash
 # 生成产物清单：精确包版本 + 构建元数据，供审计与"两次构建是否一致"对账
 set -eu
-ROOT=${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}   # 默认取仓库根，换机器无需改脚本
+# 项目根：submodule 布局下脚本父目录是 buildkit 根，不是项目根，所以只能取调用方的 cwd
+ROOT=${ROOT:-$PWD}
 DID=$1; TIER=$2
 . "$ROOT/distros/$DID.conf"
 IMG="$IMAGE:$TIER"

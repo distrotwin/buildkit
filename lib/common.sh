@@ -34,8 +34,20 @@ verify_repo_signature() {
   local base=$1 suite=$2 tmp
   [ -f "$KEYRING" ] || die "keyring 不存在: $KEYRING"
   tmp=$(mktemp -d)
-  if ! curl -fsS --max-time 90 -o "$tmp/InRelease" "$base/dists/$suite/InRelease"; then
-    rm -rf "$tmp"; die "取不到 $suite 的 InRelease"
+  # 国内归档站对境外出口不稳定：实测过「返回 200 且 Content-Length 正确、
+  # body 却是 0 字节直到超时」。所以必须重试，并且**校验落地字节非空**——
+  # 只看 curl 退出码会把「拿到空文件」当成拿到了。
+  local got=no
+  for _i in 1 2 3 4 5; do
+    rm -f "$tmp/InRelease"
+    if curl -fsS --connect-timeout 20 --max-time 240 --retry 3 --retry-delay 3 \
+         --retry-all-errors -o "$tmp/InRelease" "$base/dists/$suite/InRelease" \
+       && [ -s "$tmp/InRelease" ]; then got=yes; break; fi
+    log "取 InRelease 第 $_i 次未成（落地 $(stat -c%s "$tmp/InRelease" 2>/dev/null || echo 0) 字节），重试"
+    sleep 5
+  done
+  if [ "$got" != yes ]; then
+    rm -rf "$tmp"; die "取不到 $suite 的 InRelease（五轮重试均失败）"
   fi
   if gpgv --keyring "$KEYRING" "$tmp/InRelease" 2>&1 | grep -q "Good signature"; then
     local who; who=$(gpgv --keyring "$KEYRING" "$tmp/InRelease" 2>&1 | grep -o 'Good signature from.*' | head -1)

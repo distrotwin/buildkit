@@ -73,6 +73,7 @@ build_mmdebstrap() {
       "${HOOKS[@]}" "${EXC[@]}" \
       --skip=chroot/policy-rc.d \
       --aptopt='APT::Key::gpgvcommand "gpgv"' \
+      --aptopt='Acquire::Retries "5"' \
       --aptopt='Acquire::Languages "none"' \
       --aptopt='APT::Install-Recommends "false"' \
       --setup-hook="ROOT=$ROOT DID=$DID KEYRING=$KEYRING $BK/build/setup.sh \"\$1\"" \
@@ -214,6 +215,7 @@ build_debmedia() {
       --mode=root --architectures=$ARCH --format=tar --variant="$variant" \
       "${INC_ARG[@]}" "${HOOKS[@]}" "${EXC[@]}" \
       --skip=chroot/policy-rc.d \
+      --aptopt='Acquire::Retries "5"' \
       --aptopt='Acquire::Languages "none"' \
       --aptopt='APT::Install-Recommends "false"' \
       --setup-hook="ROOT=$ROOT DID=$DID KEYRING=$KEYRING $BK/build/setup.sh \"\$1\"" \

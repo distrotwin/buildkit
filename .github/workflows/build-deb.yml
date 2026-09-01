@@ -54,26 +54,50 @@ jobs:
       # 麒麟/统信的归档站都在国内，没有全球 CDN 迹象，境外 runner 能否访问是未知项。
       # 放在最前面探一次：不通的话 30 秒内就报出来，而不是等 setup 走完五分钟后
       # 死在 debootstrap 里、报错还指向别处。
+      # 探一次源，不通就在 30 秒内报出来，而不是等 setup 走完再死在 debootstrap 里。
+      #
+      # 这一步自己也踩过两次，两次都是「守卫比被守的东西更不可靠」：
+      #   ① 漏传 ARCH，conf 里按架构分支的覆写让 source 直接失败，curl 一次没跑；
+      #   ② code=$(curl -w '%{http_code}' || echo 000) 会把两段输出拼起来，
+      #      传输中途卡死时得到 "200000" 这种不是合法状态码的垃圾值，
+      #      而报错文案却断言「该站仅面向国内、需要自建镜像」——同一批 runner 上
+      #      别的 suite 明明取到了。
+      # 所以现在：退出码与状态码分开取，允许重试，且只陈述观测到的事实。
       - name: 探源可达性
         env:
           ARCH: ${{ inputs.arch }}
           ROOT: ${{ github.workspace }}
         run: |
           set -eu
-          # 用 conf-get 而不是直接 source：conf 里有按 ARCH 分支的覆写，
-          # 直接 source 就要求每个步骤都记得传 ARCH，漏一个的报错
-          # （conf: line N: ARCH: unbound variable）离真因很远。
           read -r MIRROR SUITE <<<"$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' MIRROR SUITE | tr '\n' ' ')"
           U="${MIRROR%/}/dists/$SUITE/Release"
           echo "探测 $U"
-          code=$(curl -s -o /tmp/rel -w '%{http_code}' --max-time 60 "$U" || echo 000)
-          size=$(stat -c%s /tmp/rel 2>/dev/null || echo 0)
-          echo "HTTP $code，落地 $size 字节"
-          [ "$code" = "200" ] && [ "$size" -gt 200 ] || {
-            echo "::error::软件源从本 runner 不可达（HTTP $code，$size 字节）。"
-            echo "::error::这台 runner 在境外，而该归档站可能仅面向国内。需要自建镜像或改用国内 runner。"
-            exit 1; }
+          ok=no
+          for i in 1 2 3; do
+            rm -f /tmp/rel
+            code=$(curl -sS -o /tmp/rel -w '%{http_code}' \
+                     --connect-timeout 20 --max-time 180 \
+                     --retry 2 --retry-all-errors "$U" 2>/tmp/curl.err) && rc=0 || rc=$?
+            size=$(stat -c%s /tmp/rel 2>/dev/null || echo 0)
+            echo "第 $i 次: curl 退出码=$rc  HTTP=$code  落地=$size 字节"
+            [ "$rc" = 0 ] && [ "$code" = 200 ] && [ "$size" -gt 200 ] && { ok=yes; break; }
+            [ -s /tmp/curl.err ] && sed 's/^/    curl: /' /tmp/curl.err
+          done
+          if [ "$ok" != yes ]; then
+            echo "::error::取不到 $U（最后一次：退出码 $rc、HTTP $code、$size 字节）"
+            echo "::error::注意区分三种情况：连不上（DNS/TCP）、服务端拒绝（4xx/5xx）、"
+            echo "::error::以及返回 200 但传输卡死（退出码 28、字节数远小于预期）。三者的处置完全不同。"
+            exit 1
+          fi
           grep -iE '^(Origin|Label|Suite|Date|Architectures)' /tmp/rel | sed 's/^/  /'
+
+          # 量一次实际吞吐。这个数决定 CI 可行性：一次 base/devel 档要拉几百 MB，
+          # 几十 KB/s 是跑不完的（作业上限 6 小时），而失败形态会是超时而不是报错，
+          # 很难归因。拿主索引当样本，只测不判，数字留在日志里供决策。
+          IDX="${MIRROR%/}/dists/$SUITE/main/binary-$ARCH/Packages.gz"
+          curl -sS -o /dev/null --connect-timeout 20 --max-time 240 \
+            -w "吞吐样本 %{size_download} 字节  %{speed_download} B/s  用时 %{time_total}s\n" \
+            "$IDX" || echo "吞吐样本取失败（不阻塞）"
 
       - name: 安装构建依赖
         run: |

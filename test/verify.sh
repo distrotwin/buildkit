@@ -276,7 +276,7 @@ for DID in $DISTROS; do
                # 断言写成"必须是这个失败形态"，而不是笼统放过：若哪天 update 又坏了，
                # 值会变成 NOUPDATE，这条就会失败。
                case "$(g apt_roundtrip)" in
-                 NOUPDATE) fail "apt_roundtrip: apt-get update 失败了（UOS 的 401 授权源是否又启用了？）" ;;
+                 NOUPDATE) fail "apt_roundtrip: apt-get update 失败了 — $(g apt_update_err)" ;;
                  N*not-installed*) pass "apt_roundtrip 如期无 OS 包可装（OSTree+玲珑分发）" ;;
                  Y) pass "apt_roundtrip 竟然可装 OS 包（源内容变了，需复核期望）" ;;
                  *) fail "apt_roundtrip 形态未预期: $(g apt_roundtrip)" ;;
@@ -284,7 +284,13 @@ for DID in $DISTROS; do
                check apt_check_after OK "$(g apt_check_after)"
                check audit_after 0 "$(g audit_after)"
              else
-               check apt_check OK "$(g apt_check)"; check apt_roundtrip Y "$(g apt_roundtrip)"
+               check apt_check OK "$(g apt_check)"
+               # NOUPDATE 单独报，把镜像内的真实报错带出来，否则只有一个结论没有线索
+               if [ "$(g apt_roundtrip)" = NOUPDATE ]; then
+                 fail "apt_roundtrip: apt-get update 失败了 — $(g apt_update_err)"
+               else
+                 check apt_roundtrip Y "$(g apt_roundtrip)"
+               fi
                # 往返之后 dpkg 状态必须仍然干净——这是"能装包"的真正含义
                check audit_after 0 "$(g audit_after)"
                check apt_check_after OK "$(g apt_check_after)"

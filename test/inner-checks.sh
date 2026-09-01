@@ -212,11 +212,16 @@ if [ -x /usr/bin/apt-get ]; then
   # 源对境外出口偶发卡死（返回 200、Content-Length 正确、body 零字节），单次 60 秒
   # 足以被打穿：实测同一版本同一架构的 devel 通过而 base 报 NOUPDATE，两者的
   # sources.list 完全一样——那是网络抖动，不是镜像缺陷。
-  _upd=no
+  _upd=no; _uerr=""
   for _i in 1 2 3; do
-    if T 60 /usr/bin/apt-get update -qq >/dev/null 2>&1; then _upd=yes; break; fi
+    if T 60 /usr/bin/apt-get update -qq >/dev/null 2>/tmp/.aptupd.err; then _upd=yes; break; fi
+    # 留下失败原因。原先这里是 2>&1 >/dev/null，于是 NOUPDATE 只是一个结论、
+    # 没有任何线索：连不上、验签不过、缺 gpgv、源不完整，长得一模一样。
+    # 两轮 CI 里 v4 的 base 档各失败一次而 devel 都通过，靠猜排不出来。
+    _uerr=$(tr '\n' ' ' < /tmp/.aptupd.err 2>/dev/null | tail -c 300)
     sleep 5
   done
+  [ "$_upd" = yes ] || kv apt_update_err "${_uerr:-无输出}"
   if [ "$_upd" = yes ]; then
     DEBIAN_FRONTEND=noninteractive T 90 /usr/bin/apt-get install -y -qq --no-install-recommends nano >/dev/null 2>&1
     st=$(dpkg-query $A -W -f='${Status}' nano 2>/dev/null)

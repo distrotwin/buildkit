@@ -38,7 +38,13 @@
 | `loongarch64` | `/lib64/ld.so.1` | 旧世界 |
 | `loong64` | `/lib64/ld-linux-loongarch-lp64d.so.1` | 新世界（上游 ABI） |
 
-两者的 multiarch 三元组同名，产物却不可互换。上游 QEMU 只保证新世界；旧世界的目标要先跑通 smoke test 再进发布矩阵，不能凭厂商声明就承诺。
+两者的 multiarch 三元组同名，产物却不可互换。
+
+**旧世界在上游 QEMU 下跑不起来，这一点已实测。** 把目标系统的 `libc6` 与 `bash` 拼成最小 rootfs，用 `qemu-loongarch64-static -L <rootfs>` 直接执行：新世界的 bash 正常退出，内建变量 `MACHTYPE` 为 `loongarch64-unknown-linux-gnu`（编译期烧进二进制，可证明执行的是目标架构产物）；旧世界的 bash 停在动态链接阶段，`-strace` 显示它打开了目标 so、读出了 ELF 头，然后撞上 `Unknown syscall 80`。
+
+syscall 79 与 80 是通用 Linux ABI 的 `newfstatat` 与 `fstat`。LoongArch 新世界去掉了这两个调用只保留 `statx`，上游 QEMU 的 loongarch64 target 因此没有实现它们，而旧世界的 glibc 仍在用。这不是缺库或路径问题，是系统调用 ABI 本身不同。
+
+由此得到一条可复用的判据：**给一个陌生架构做镜像之前，先用「最小 rootfs + 只跑 shell 内建」验一次能不能真正执行。** 只用内建（`echo`、`$MACHTYPE`、算术展开）是关键——rootfs 里没有 `uname` 时，emulated shell 会沿宿主 PATH 执行宿主的 `uname`，输出宿主架构，看起来像是跑通了。
 
 **component 布局可能随架构变。** 同一台归档上，`libc6` 在 amd64/arm64 下可能位于 `universe`，在 LoongArch 下却位于 `main`。`COMPONENTS` 只配一个值会得到一个没有 libc6 的源，而 `debootstrap` 报的错离真因很远。conf 里按架构覆写，不要照抄。
 

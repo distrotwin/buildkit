@@ -20,6 +20,23 @@ log "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ($(date -u -d @$SOURCE_DATE_EPOCH 2>/d
 # 落盘供清单引用：epoch 是逐位复现的必要输入，不记下来 manifest 就兑现不了 report.md §8（可复现性） 的承诺
 mkdir -p "$ROOT/out"; printf '%s' "$SOURCE_DATE_EPOCH" > "$ROOT/out/$DID.epoch"
 
+# keyring 安置到 apt 的规范位置，并自证 _apt 能读到。
+# 缺这一步的表现是 apt 报 NO_PUBKEY 而 gpgv 同时报验签通过——两个结论矛盾时，
+# 差别在于读文件的用户是谁，不在 key 对不对。
+APT_KEYRING="/etc/apt/keyrings/$(basename "${KEYRING:-kylin-archive-keyring.gpg}")"
+prepare_apt_keyring() {
+  [ -f "$KEYRING" ] || die "keyring 不存在: $KEYRING"
+  install -d -m 755 /etc/apt/keyrings
+  install -m 644 "$KEYRING" "$APT_KEYRING"
+  if id _apt >/dev/null 2>&1; then
+    su -s /bin/sh _apt -c "test -r '$APT_KEYRING'" \
+      || die "keyring 落位后 _apt 仍读不到: $APT_KEYRING"
+    log "keyring 就位 $APT_KEYRING（_apt 可读）"
+  else
+    log "keyring 就位 $APT_KEYRING（本机无 _apt 用户，跳过读权自证）"
+  fi
+}
+
 EXC=(
  --dpkgopt=path-exclude=/usr/share/doc/*      --dpkgopt=path-include=/usr/share/doc/*/copyright
  --dpkgopt=path-exclude=/usr/share/man/*      --dpkgopt=path-exclude=/usr/share/info/*
@@ -40,10 +57,16 @@ build_mmdebstrap() {
   local HOOKS=()
   [ "${USRMERGE:-no}" = yes ] && HOOKS+=(--hook-dir=/usr/share/mmdebstrap/hooks/merged-usr)
   local OUT="$ROOT/out/$DID-$TIER.tar"
+  prepare_apt_keyring
   rm -f "$OUT"
   log "[$DID/$TIER] mmdebstrap variant=$variant"
+  # signed-by 走**宿主**路径。实测过：mmdebstrap 下 apt 按宿主路径解析，
+  # 写 chroot 内路径即使 setup-hook 已把文件拷进去，也照样报 NO_PUBKEY。
+  # 但不能直接指向仓库里的 keyring：apt 验签时降权到 _apt 用户，深埋在用户
+  # 目录下的路径它读不到，报出来同样是 NO_PUBKEY <指纹>——而那个指纹就在
+  # 文件里，很容易误判成信任根不对而去换 key。落到 apt 自己的规范位置最稳。
   printf 'deb [trusted=yes] copy://%s/localrepo/%s ./\ndeb [signed-by=%s] %s %s %s\n' \
-      "$ROOT" "$DID" "$KEYRING" "$MIRROR" "$SUITE" "$COMPONENTS" | \
+      "$ROOT" "$DID" "$APT_KEYRING" "$MIRROR" "$SUITE" "$COMPONENTS" | \
   DID=$DID TIER=$TIER ROOT=$ROOT SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" mmdebstrap \
       --mode=root --architectures=$ARCH --format=tar --variant="$variant" \
       "${INC_ARG[@]}" \
@@ -52,7 +75,7 @@ build_mmdebstrap() {
       --aptopt='APT::Key::gpgvcommand "gpgv"' \
       --aptopt='Acquire::Languages "none"' \
       --aptopt='APT::Install-Recommends "false"' \
-      --setup-hook="ROOT=$ROOT DID=$DID $BK/build/setup.sh \"\$1\"" \
+      --setup-hook="ROOT=$ROOT DID=$DID KEYRING=$KEYRING $BK/build/setup.sh \"\$1\"" \
       --customize-hook="ROOT=$ROOT DID=$DID TIER=$TIER $BK/build/customize.sh \"\$1\"" \
       "$SUITE" "$OUT" -
   [ -s "$OUT" ] || die "[$DID/$TIER] 无产物"
@@ -193,7 +216,7 @@ build_debmedia() {
       --skip=chroot/policy-rc.d \
       --aptopt='Acquire::Languages "none"' \
       --aptopt='APT::Install-Recommends "false"' \
-      --setup-hook="ROOT=$ROOT DID=$DID $BK/build/setup.sh \"\$1\"" \
+      --setup-hook="ROOT=$ROOT DID=$DID KEYRING=$KEYRING $BK/build/setup.sh \"\$1\"" \
       --customize-hook="ROOT=$ROOT DID=$DID TIER=$TIER $BK/build/customize.sh \"\$1\"" \
       "$SUITE" "$OUT" -
   [ -s "$OUT" ] || die "[$DID/$TIER] 产物为空"
@@ -230,12 +253,34 @@ case $METHOD in
   *) die "未知 METHOD=$METHOD" ;;
 esac
 [ "$METHOD" = mmdebstrap ] && verify_repo_signature "${MIRROR%/}" "$SUITE"
+
+# selfhost 是整体两段式，三档在同一次调用里产出（阶段 1 的 stage 三档共用），
+# 不能按档位逐个进循环。原先这里只打印一行说明、由外层 Makefile 分别调用两个脚本，
+# 搬到 CI 之后就成了静默空转：退出码 0、一个产物都没有，直到下一步报
+# 「缺 out/xxx-micro.tar」才暴露，而那个报错指向的是导入步骤、不是构建步骤。
+if [ "$METHOD" = selfhost ]; then
+  log "[$DID] 转 selfhost 两段式：$TIERS"
+  DID=$DID ROOT=$ROOT BK=$BK ARCH=$ARCH "$BK/build/build-selfhost.sh" $TIERS
+else
+  for T in $TIERS; do
+    case $METHOD in
+      mmdebstrap) build_mmdebstrap "$T" ;;
+      slice)      build_slice "$T" ;;
+      debmedia)   build_debmedia "$T" ;;
+      rpmmedia)   build_rpmmedia "$T" ;;
+    esac
+  done
+fi
+
+# 出口断言：不允许「退出码 0 但没有产物」。selfhost 的产物由 docker import 直接
+# 落成镜像而非 tar，两种形态都算通过。
 for T in $TIERS; do
-  case $METHOD in
-    mmdebstrap) build_mmdebstrap "$T" ;;
-    slice)      build_slice "$T" ;;
-    debmedia)   build_debmedia "$T" ;;
-    rpmmedia)   build_rpmmedia "$T" ;;
-    selfhost)   log "[$DID/$T] selfhost 由 build/build-selfhost.sh 处理" ;;
-  esac
+  [ -s "$ROOT/out/$DID-$T.tar" ] && continue
+  # 容器内没有 docker 客户端，此时只能以 tar 为准；selfhost 路径在宿主跑，
+  # 它的产物由 docker import 直接落成镜像，那种形态也算通过。
+  if command -v docker >/dev/null 2>&1 && docker image inspect "${IMAGE}:$T" >/dev/null 2>&1; then
+    continue
+  fi
+  die "[$DID/$T] 构建声称成功，但既没有 out/$DID-$T.tar 也没有镜像 ${IMAGE}:$T"
 done
+log "[$DID] 全部档位均有产物：$TIERS"

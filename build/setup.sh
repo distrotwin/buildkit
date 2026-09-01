@@ -4,6 +4,7 @@ set -eu
 ROOT="${ROOT:-/w}"; DID="${DID:?}"
 . "$ROOT/distros/$DID.conf"
 R=$1
+
 [ -n "${PIN_NEVER:-}" ] || exit 0
 mkdir -p "$R/etc/apt/preferences.d"
 {

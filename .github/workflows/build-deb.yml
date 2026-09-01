@@ -135,12 +135,27 @@ jobs:
             echo "${{ inputs.distro-id }} 无 REPACK_DEBS / STUB_PROVIDES，跳过本地源"
           fi
 
+      # 执行位置按 METHOD 分派，这一点不能省：
+      #   mmdebstrap / slice / rpmmedia  在 builder 容器（Debian 13）里跑
+      #   selfhost                        在宿主跑，它自己 docker exec 进容器做阶段 1
+      # 曾经全部放在宿主跑，结果 Ubuntu 22.04 的 apt 2.4 / mmdebstrap 0.8 与容器里的
+      # Debian 13 行为不同，sources.list 的 signed-by 不被采纳，报 NO_PUBKEY <指纹>——
+      # 而那个指纹就在 keyring 里，gpgv 同时还验签通过。builder 容器存在的意义正是
+      # 钉住构建工具链，绕过它等于白建。
       - name: 构建三档
         env:
           ARCH: ${{ inputs.arch }}
           ROOT: ${{ github.workspace }}
         run: |
-          sudo -E buildkit/build/build.sh "${{ inputs.distro-id }}" ${{ inputs.tiers }}
+          set -eu
+          M=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' METHOD)
+          echo "METHOD=$M"
+          if [ "$M" = selfhost ]; then
+            sudo -E buildkit/build/build.sh "${{ inputs.distro-id }}" ${{ inputs.tiers }}
+          else
+            docker exec -e http_proxy= -e https_proxy= dosb bash -c \
+              "umask 022; ROOT=/w BK=/w/buildkit ARCH=$ARCH /w/buildkit/build/build.sh '${{ inputs.distro-id }}' ${{ inputs.tiers }}"
+          fi
 
       - name: 导入并校验
         env:

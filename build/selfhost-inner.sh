@@ -1,0 +1,160 @@
+#!/bin/bash
+# 在麒麟 V10 的 stage 容器内执行：自举 configure -> 装档位包 -> 容器化适配 -> 自检
+export DEBIAN_FRONTEND=noninteractive
+set -u
+say(){ printf '    %s\n' "$*"; }
+
+mkdir -p /run/lock /var/lib/dpkg/updates
+# ① 真正的自举：用**目标系统自己的 dpkg 1.19.7** 跑 debootstrap 第二阶段
+#    （宿主 Debian13 的 dpkg 1.22 写出的 status 麒麟读不了，所以注册+配置必须在这里做）
+if [ -x /debootstrap/debootstrap ]; then
+  /debootstrap/debootstrap --second-stage 2>&1 | tail -3
+  say "第二阶段 rc=$?"
+fi
+dpkg --configure -a --force-depends >/dev/null 2>&1
+say "自举结果: installed=$(grep -c '^Status: install ok installed' /var/lib/dpkg/status 2>/dev/null) unpacked=$(grep -c '^Status: install ok unpacked' /var/lib/dpkg/status 2>/dev/null) dpkg=$(dpkg --version 2>/dev/null|head -1|grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+
+# ①b debootstrap 第二阶段只装 required 集；--include 下来的 base 集（apt 等）
+#     还躺在 /var/cache/apt/archives。用这些**已通过 GPG 校验**的 deb 补装。
+if ! command -v apt-get >/dev/null 2>&1; then
+  # PIN_NEVER 必须在这条路径上也生效。它原先只写进 apt 的 preferences，而这里是
+  # `dpkg -i .../*.deb` 一律装上 —— 同一条策略在 apt 路径被遵守、在 dpkg 回落路径
+  # 被静默忽略。凝思因此带进了 linx-noroot-conf，状态停在 half-configured，
+  # `dpkg --audit` 多一条。策略只覆盖部分代码路径，是本仓库反复出的形态。
+  DEBS=""
+  for f in /var/cache/apt/archives/*.deb; do
+    [ -e "$f" ] || continue
+    skip=no
+    for p in ${PIN_NEVER:-}; do
+      case "$(basename "$f")" in "${p}_"*) skip=yes ;; esac
+    done
+    [ "$skip" = yes ] && { say "  跳过被 PIN_NEVER 排除的 $(basename "$f")"; continue; }
+    DEBS="$DEBS $f"
+  done
+  n=$(printf '%s\n' $DEBS | sed '/^$/d' | wc -l)
+  say "apt 不在，从 stage 缓存补装 $n 个 deb"
+  dpkg -i --force-depends --force-confold $DEBS >/dev/null 2>&1 || true
+  dpkg --configure -a --force-depends >/dev/null 2>&1 || true
+  # 只报告，不移除。被 pin 的包如果仍在库里，说明它是从 debootstrap 的 base 集
+  # 进来的 —— 那要靠 build-selfhost.sh 的 `debootstrap --exclude` 在入口拦。
+  # 这里**不能** `dpkg --purge --force-depends`：实测会把依赖图弄坏
+  # （apt 依赖状态不健康），比原症状「dpkg --audit 多一条」更重。
+  # 修复动作造成的破坏大于原症状时，正确选择是退回报告、把修复挪到正确的入口。
+  for p in ${PIN_NEVER:-}; do
+    st=$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null || true)
+    case "$st" in
+      *installed*|*unpacked*|*half*)
+        say "  ⚠ $p 仍在库里（$st）—— 应由 debootstrap --exclude 在入口拦住" ;;
+    esac
+  done
+  say "补装后: installed=$(grep -c '^Status: install ok installed' /var/lib/dpkg/status) apt=$(command -v apt-get||echo 仍无)"
+fi
+
+# ② base-files 在 --foreign 解包后常处于损坏态，重装修好
+mkdir -p /etc/apt/preferences.d /usr/share/keyrings
+# ⚠️ 只在真正验签的路径上拷 keyring。原先无条件拷麒麟那把，于是凝思三档
+# （NO_CHECK_GPG=yes、出厂无源）各留下一把**跨厂商且无消费方**的 key ——
+# 正是 §3.1「多一把没用的 key 就是多一份可被滥用的授权」要杜绝的情形，
+# 出现在最新加入的被试上。审稿复核抓到，verify.py 的 keyring 断言当时就在报失败，
+# 而我把它混在一批「断言过时」里没有逐条读 —— 失败清单太长会淹没真问题。
+if [ "${NO_CHECK_GPG:-no}" != yes ]; then
+  cp /keys/kylin-archive-keyring.gpg /usr/share/keyrings/ 2>/dev/null || true
+else
+  say "介质无签名（NO_CHECK_GPG=yes），不注入任何 keyring"
+fi
+# 在线源要验签；介质本地源没有签名（完整性锚点是 ISO 的官方校验值），
+# 所以按 NO_CHECK_GPG 决定用 signed-by 还是 trusted=yes。
+if [ "${NO_CHECK_GPG:-no}" = yes ]; then
+  APT_OPT="trusted=yes"
+else
+  APT_OPT="signed-by=/usr/share/keyrings/kylin-archive-keyring.gpg"
+fi
+printf 'deb [%s] %s %s %s\n' "$APT_OPT" "$MIRROR" "$SUITE" "$COMPONENTS" > /etc/apt/sources.list
+printf 'APT::Key::gpgvcommand "gpgv";\n' > /etc/apt/apt.conf.d/docker-gpgv
+if [ -n "${PIN_NEVER:-}" ]; then
+  { for p in $PIN_NEVER; do printf 'Package: %s\nPin: release *\nPin-Priority: -1\n\n' "$p"; done; } \
+    > /etc/apt/preferences.d/99-container-never-install
+fi
+apt-get update -qq 2>&1 | tail -1
+apt-get install -y -qq --reinstall base-files >/dev/null 2>&1 || true
+dpkg --configure -a >/dev/null 2>&1 || true
+
+# ③ 装档位包（逐包，规避大事务里的厂商 dpkg 缺陷）
+# 注意：apt-get 的退出码不能被管道丢掉，且 `apt-get check` **只验已装包之间的依赖一致性**，
+# 对"某个包压根没装上"一无所知。所以装完必须逐包断言 Status 为 install ok installed。
+MISSING=""
+if [ -n "${PKGS:-}" ]; then
+  for p in $PKGS; do
+    # -o Dpkg::Use-Pty=false：容器里没挂 devpts，apt 开伪终端写日志会失败并返回 100，
+    # 而包其实已经装上。一次构建刷三十多行假警报，真警报就会被一起忽略。
+    out=$(apt-get install -y -qq --no-install-recommends -o Dpkg::Use-Pty=false "$p" 2>&1); rc=$?
+    printf '%s' "$out" | grep -iE '^E:|segmentation' | head -1
+    [ "$rc" -ne 0 ] && say "  ⚠ apt install $p 退出码 $rc"
+    dpkg --configure -a >/dev/null 2>&1 || true
+  done
+  for p in $PKGS; do
+    st=$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null)
+    [ "$st" = "install ok installed" ] || MISSING="$MISSING $p"
+  done
+fi
+
+# ④ micro 档拔掉 apt
+if [ "$TIER" = micro ]; then
+  for p in apt apt-utils; do
+    if dpkg-query -W "$p" >/dev/null 2>&1; then
+      rm -f /var/lib/dpkg/info/$p.pre* /var/lib/dpkg/info/$p.post*
+      dpkg --purge --force-all "$p" >/dev/null 2>&1 || true
+    fi
+  done
+fi
+
+# ⑤ 证书 + locale
+command -v update-ca-certificates >/dev/null 2>&1 && update-ca-certificates >/dev/null 2>&1
+if [ -d /usr/share/i18n/locales ] && command -v localedef >/dev/null 2>&1; then
+  localedef -i zh_CN -c -f UTF-8 zh_CN.UTF-8 2>/dev/null || true
+  localedef -i en_US -c -f UTF-8 en_US.UTF-8 2>/dev/null || true
+fi
+
+# ⑥ 容器化适配 —— 直接复用 lib/common.sh 的 adapt_container，不再手写复刻。
+#    之前这里是一份手抄版，注释写着"与 adapt_container 保持一致"却没有任何机制保障，
+#    结果 kylin10 静默缺了 apt 调优、/tmp 权限、nsswitch 兜底、SONAME 冗余文件修复等一整批。
+if [ -f /dosbuild-lib/common.sh ]; then
+  # 仓库是挂载进来的，路径与构建容器不同，所以显式指定 ASSETS_DIR / KEYRING
+  ASSETS_DIR=/dosbuild-assets
+  KEYRING=/keys/kylin-archive-keyring.gpg
+  . /dosbuild-lib/common.sh
+  # micro 档没有 apt，出厂时不该留在线源配置。上面第 29-30 行那份是**构建期必需**的
+  # （阶段 3 要用 apt 装档位包），这里是出厂前的适配，要按档位清掉。
+  # ⚠️ keyring 文件不删：麒麟 V10 的 /usr/share/keyrings/kylin-archive-keyring.gpg
+  # 属厂商 kylin-keyring 包（我们的 cp 只是覆盖了同内容的同一路径），删它会破坏
+  # dpkg 的文件清单，也越过了「等价环境」的底线 —— 判据是属主，不是路径。
+  # MIRROR 是**构建期**的源。四个被试里它恰好也是可出厂的在线源，凝思不是——
+  # 它的 MIRROR 是 file:///w/media/lx，即 builder 的挂载路径。照抄进出厂镜像的
+  # 结果是运行时那个路径不存在，apt update 必失败，而报错只说取不到源。
+  # 所以只有网络源才写进出厂 sources.list；本地介质出厂时写空，与 UOS 同样处理。
+  case "$MIRROR" in
+    http://*|https://*|ftp://*) SHIPPABLE=yes ;;
+    *) SHIPPABLE=no ;;
+  esac
+  if [ "$TIER" = micro ] || [ "$SHIPPABLE" = no ]; then
+    SRCLIST=""
+    [ "$SHIPPABLE" = no ] && [ "$TIER" != micro ] && \
+      say "出厂 sources.list 留空：构建期源 $MIRROR 是本地介质，非网络源"
+  else
+    SRCLIST="deb [$APT_OPT] $MIRROR $SUITE $COMPONENTS"
+  fi
+  adapt_container / "$SRCLIST" "${DID:-}"
+  slim_locales /
+  say "容器化适配: 复用 lib/common.sh::adapt_container"
+else
+  say "!! 找不到 /dosbuild-lib/common.sh，无法做容器化适配"; exit 1
+fi
+
+# ⑦ 自检
+hash -r 2>/dev/null || true
+AC=n/a
+if [ -x /usr/bin/apt-get ]; then /usr/bin/apt-get check >/dev/null 2>&1 && AC=OK || AC=BAD; fi
+say "自检: apt-check=$AC audit=$(dpkg --audit 2>&1|wc -l) locale=$(locale -a 2>/dev/null|grep -c zh_CN) ca=$(stat -c%s /etc/ssl/certs/ca-certificates.crt 2>/dev/null||echo 0)"
+if [ "$AC" = BAD ]; then say '!! apt 依赖状态不健康'; apt-get check 2>&1 | head -12 | sed 's/^/      /'; exit 1; fi
+if [ -n "${MISSING# }" ]; then say "!! 以下档位包没装上:$MISSING"; exit 1; fi
+exit 0

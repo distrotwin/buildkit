@@ -1,0 +1,10 @@
+*.tar
+out/
+work/
+logs/
+localrepo/
+__pycache__/
+*.pyc
+gate/t_low
+gate/t_high
+gate/t_high_cxx

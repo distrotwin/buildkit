@@ -155,13 +155,25 @@ build_slice() {
     # 它只是加速用的中间产物，删掉不影响任何功能，而且本来就不该出厂。
     rm -rf "$D/var/cache/ldconfig" 2>/dev/null || true
   fi
-  # locale：宿主的 localedef 版本可能不同，用容器化方式在目标 rootfs 里生成
-  if [ -d "$D/usr/share/i18n/locales" ] && [ -x "$D/usr/bin/localedef" ]; then
-    chroot "$D" /usr/bin/localedef -i zh_CN -c -f UTF-8 zh_CN.UTF-8 \
-      || die "[$DID/$TIER] localedef zh_CN 失败（跨架构时宿主需装 qemu-user-static）"
-    chroot "$D" /usr/bin/localedef -i en_US -c -f UTF-8 en_US.UTF-8 \
-      || die "[$DID/$TIER] localedef en_US 失败（跨架构时宿主需装 qemu-user-static）"
+  # locale 归档与 ld.so.cache 同类：postinst 产物，不属于任何包，切片必漏。
+  # 先从源 rootfs 搬现成的——真机装完就有，比在 chroot 里现生成可靠得多。
+  if [ -d "$SRC_ROOTFS/usr/lib/locale" ] && [ ! -e "$D/usr/lib/locale" ]; then
+    mkdir -p "$D/usr/lib"
+    cp -a "$SRC_ROOTFS/usr/lib/locale" "$D/usr/lib/" 2>/dev/null || true
+    log "  从源 rootfs 搬入 usr/lib/locale"
   fi
+  # 再用 localedef 补一遍。不用 `[ -x ]` 判它跑不跑得起来：那个测试在宿主侧解析
+  # 路径，若 /usr/bin/localedef 是绝对符号链接，宿主上目标存在而 chroot 内不存在，
+  # -x 会放行而 chroot 报 ENOENT——V20 实测就是这样。直接跑，跑不起来就跳过。
+  if [ -d "$D/usr/share/i18n/locales" ]; then
+    chroot "$D" /usr/bin/localedef -i zh_CN -c -f UTF-8 zh_CN.UTF-8 2>/dev/null \
+      || log "  localedef zh_CN 跑不起来，改依赖搬入的 locale 归档"
+    chroot "$D" /usr/bin/localedef -i en_US -c -f UTF-8 en_US.UTF-8 2>/dev/null || true
+  fi
+  # 判据看结果不看手段：镜像里得真有 zh_CN，搬来的还是现生成的无所谓。
+  # 运行时的权威判定在 verify 的 locale_zh（`locale -a`），这里只做一道早失败。
+  [ -d "$D/usr/lib/locale/zh_CN.utf8" ] || [ -s "$D/usr/lib/locale/locale-archive" ] \
+    || die "[$DID/$TIER] 镜像里没有 zh_CN locale：源 rootfs 无 usr/lib/locale，localedef 也没跑成"
   slim_locales "$D"
   make_tarball "$D" "$OUT"
 }

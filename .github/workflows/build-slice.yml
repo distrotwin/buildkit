@@ -16,6 +16,7 @@ on:
       runner:    { type: string, required: true }
       tiers:     { type: string, default: "micro base devel" }
       harvest:   { type: boolean, default: false, description: "只采 squashfs 指纹，不构建" }
+      needs-qemu: { type: boolean, default: false, description: "目标架构与 runner 不同，切片时要 chroot 进目标 rootfs 跑 ldconfig/localedef" }
       # 实测：GitHub runner 到这个国内 CDN 约 1 MB/s，3 GiB 的 squashfs 要 57~59 分钟。
       # 默认给到 240 分钟是为了让单次尝试足够跑完——超时重来不会续传，
       # 已下的几个 G 会白费，所以宁可把单次窗口开够，retry 只留给真正的传输中断。
@@ -53,6 +54,23 @@ jobs:
                       /usr/local/share/boost /usr/share/swift "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends squashfs-tools zstd curl python3 file
+          # 切片要 chroot 进目标 rootfs 跑 ldconfig 与 localedef（它们的产物不属于
+          # 任何包，切片必漏）。目标架构与 runner 不同时，那两条 chroot 靠 binfmt
+          # 才能 exec，缺了会静默失败——直到验收才报 ldcache 为 0。
+          if [ "${{ inputs.needs-qemu }}" = true ]; then
+            sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+            case "${{ inputs.arch }}" in
+              loong64|loongarch64) NEED=qemu-loongarch64 ;;
+              arm64)               NEED=qemu-aarch64 ;;
+              *)                   NEED="" ;;
+            esac
+            if [ -n "$NEED" ] && [ ! -e "/proc/sys/fs/binfmt_misc/$NEED" ]; then
+              echo "::error::binfmt 缺少 $NEED，切片时无法 chroot 进 ${{ inputs.arch }} 的 rootfs"
+              echo "::error::LoongArch 需要 QEMU 7.1 以上，Ubuntu 22.04 只带 6.2，请改用更新的 runner"
+              exit 1
+            fi
+            echo "binfmt 就绪：$NEED   qemu-user-static $(dpkg-query -W -f='${Version}' qemu-user-static)"
+          fi
           echo "── 腾出后 ──"; df -h /
 
       - name: 抽 squashfs 并校验

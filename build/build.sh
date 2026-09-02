@@ -143,8 +143,13 @@ build_slice() {
   # 所以必然漏。UOS 的情形不致命 —— Debian 多架构目录在动态链接器内置默认路径里，
   # 缺 cache 只损性能；但补上更接近真机，且这一项现在有门禁盯着。
   if [ -x "$D/sbin/ldconfig" ]; then
-    chroot "$D" /sbin/ldconfig || true
-    [ -s "$D/etc/ld.so.cache" ] && log "  ld.so.cache 生成 $(stat -c%s "$D/etc/ld.so.cache") 字节"
+    # 跨架构时这一步要靠 binfmt 才能 exec 目标架构的 ldconfig。原先写成
+    # `|| true`，缺 QEMU 时它静默失败、产物照样出厂，直到验收才报
+    # 「ldcache 期望 >1000 实际 0」——症状离真因三步远。改成硬断言。
+    chroot "$D" /sbin/ldconfig \
+      || die "[$DID/$TIER] chroot ldconfig 失败（跨架构时宿主需装 qemu-user-static 并注册 binfmt）"
+    [ -s "$D/etc/ld.so.cache" ] || die "[$DID/$TIER] ldconfig 跑完却没有 /etc/ld.so.cache"
+    log "  ld.so.cache 生成 $(stat -c%s "$D/etc/ld.so.cache") 字节"
     # ldconfig 另外会写 /var/cache/ldconfig/aux-cache，它记录每个库的 inode 与
     # mtime 用于增量加速 —— 天然不可复现，实测让 uos25 三档连构两次哈希全漂。
     # 它只是加速用的中间产物，删掉不影响任何功能，而且本来就不该出厂。
@@ -152,8 +157,10 @@ build_slice() {
   fi
   # locale：宿主的 localedef 版本可能不同，用容器化方式在目标 rootfs 里生成
   if [ -d "$D/usr/share/i18n/locales" ] && [ -x "$D/usr/bin/localedef" ]; then
-    chroot "$D" /usr/bin/localedef -i zh_CN -c -f UTF-8 zh_CN.UTF-8 || true
-    chroot "$D" /usr/bin/localedef -i en_US -c -f UTF-8 en_US.UTF-8 || true
+    chroot "$D" /usr/bin/localedef -i zh_CN -c -f UTF-8 zh_CN.UTF-8 \
+      || die "[$DID/$TIER] localedef zh_CN 失败（跨架构时宿主需装 qemu-user-static）"
+    chroot "$D" /usr/bin/localedef -i en_US -c -f UTF-8 en_US.UTF-8 \
+      || die "[$DID/$TIER] localedef en_US 失败（跨架构时宿主需装 qemu-user-static）"
   fi
   slim_locales "$D"
   make_tarball "$D" "$OUT"

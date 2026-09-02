@@ -24,26 +24,58 @@ jobs:
   publish:
     runs-on: ubuntu-22.04
     steps:
+      # 需要 checkout 才能取 commit 日期与 submodule 的 SHA
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+
       - uses: actions/download-artifact@v4
         with:
           pattern: img-${{ inputs.distro-id }}-*-${{ inputs.tier }}
           path: imgs
 
+      # 实测的 ABI 值来自测试阶段，不在这里重新跑容器——跨架构时跑起来还要再装
+      # 一次 QEMU，而那个值测试阶段已经量过并写进了结果 JSON。
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-${{ inputs.distro-id }}-*-${{ inputs.tier }}
+          path: results
+          merge-multiple: true
+
+      - name: 定日期与溯源信息
+        id: meta
+        run: |
+          set -eu
+          # 日期取 kylin HEAD 的 committer date（UTC），不是构建时刻。
+          # 这样同一个 commit 无论何时重建都得同一个 tag。
+          #
+          # 但要清楚它锁不住什么：镜像内容还取决于上游源的包。同一 commit 隔一周
+          # 重建，若源更新过则产出字节不同，而 tag 相同——这是唯一的失真窗口。
+          # 抓手是构建时的 SOURCE_DATE_EPOCH 取自源 Release 的 Date 字段：
+          # 源没动则重建逐位一致，源动了则这个 label 会不同。所以两者都记进 label。
+          STAMP=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d "$GITHUB_SHA")
+          echo "stamp=$STAMP" >> "$GITHUB_OUTPUT"
+          echo "kylin_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          echo "buildkit_sha=$(git -C buildkit rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "  commit 日期 STAMP=$STAMP"
+          echo "  kylin=$GITHUB_SHA"
+          echo "  buildkit=$(git -C buildkit rev-parse HEAD)"
+
       - name: 装载各架构镜像
         run: |
           set -eu
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd jq
           found=0
           for d in imgs/*/; do
             [ -f "$d/image.tar.zst" ] || continue
             zstd -d -c "$d/image.tar.zst" | docker load
             found=$((found+1))
           done
-          # 一个都没装上时必须失败：后面的 docker tag 会报「镜像不存在」，
+          # 一个都没装上必须失败：后面的 docker tag 会报「镜像不存在」，
           # 那个报错指向 tag 而不是指向「制品没下来」，离真因很远。
           [ "$found" -gt 0 ] || { echo "::error::没有装载到任何镜像制品"; exit 1; }
           echo "装载了 $found 个镜像制品"
-          docker images --format '{{.Repository}}:{{.Tag}}' | sed 's/^/  /'
+          docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sed 's/^/  /'
 
       - uses: docker/login-action@v3
         with:
@@ -51,52 +83,114 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 推送各架构 tag
+      - name: 覆盖检查
         env:
           REG: ghcr.io/${{ github.repository_owner }}/${{ inputs.image }}
           PFX: ${{ inputs.tag-prefix }}
           TIER: ${{ inputs.tier }}
+          STAMP: ${{ steps.meta.outputs.stamp }}
         run: |
           set -eu
-          STAMP=$(date -u +%Y%m%d)
+          # 日期 tag 是「约定不动」而非强制——GHCR 的 tag 本来就可变。
+          # 一天内多次发布会覆盖它，这是允许的，但必须留痕：
+          # 否则某天有人发现自己钉的 tag 变了，却查不到何时被什么覆盖。
+          T="$REG:$PFX-$TIER-$STAMP"
+          if OLD=$(docker manifest inspect "$T" 2>/dev/null | sha256sum | cut -c1-16); then
+            echo "::warning::$T 已存在，本次发布将覆盖它（同一天内重复发布）"
+            echo "  旧 manifest 摘要（前16位）: $OLD"
+            echo "  若需保留旧版，请先用 digest 记下它：docker buildx imagetools inspect $T"
+          else
+            echo "  $T 尚不存在，本次为首发"
+          fi
+
+      - name: 打 label、推送各架构 tag
+        env:
+          REG: ghcr.io/${{ github.repository_owner }}/${{ inputs.image }}
+          PFX: ${{ inputs.tag-prefix }}
+          TIER: ${{ inputs.tier }}
+          STAMP: ${{ steps.meta.outputs.stamp }}
+          KSHA: ${{ steps.meta.outputs.kylin_sha }}
+          BSHA: ${{ steps.meta.outputs.buildkit_sha }}
+          RUNURL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
           pushed=""
           for a in ${{ inputs.arches }}; do
             SRC=$(cat "imgs/img-${{ inputs.distro-id }}-$a-$TIER/image-ref.txt" 2>/dev/null || true)
             [ -n "$SRC" ] || { echo "跳过 $a：没有该架构的制品"; continue; }
             docker image inspect "$SRC" >/dev/null 2>&1 || { echo "跳过 $a：镜像 $SRC 未装载"; continue; }
+
+            # 实测 ABI 值取自测试阶段的结果 JSON
+            RJ="results/${{ inputs.distro-id }}-$a-$TIER.json"
+            if [ -f "$RJ" ]; then
+              MG=$(jq -r '.measured.glibc // ""' "$RJ")
+              ML=$(jq -r '.measured.libstdcpp // ""' "$RJ")
+              MX=$(jq -r '.measured.glibcxx // ""' "$RJ")
+              EPOCH=$(cat "out/${{ inputs.distro-id }}.epoch" 2>/dev/null || echo "")
+            else
+              echo "::warning::找不到 $RJ，实测 ABI 值将留空"
+              MG=""; ML=""; MX=""; EPOCH=""
+            fi
+            SUITE=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SUITE)
+
+            # 溯源信息用一层纯元数据的 build 打进去（不改文件系统）。
+            # 放在这里而不是 import 时，是因为 commit SHA 与 run URL 只有发布阶段才知道，
+            # 而两条构建路径的 import 分处两个脚本——写在那儿又会变成一处对一处错。
+            echo "FROM $SRC" > /tmp/Dockerfile.meta
+            docker build --progress=plain -f /tmp/Dockerfile.meta -t "$SRC-labeled" \
+              --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+              --label "org.opencontainers.image.revision=$KSHA" \
+              --label "org.opencontainers.image.version=$PFX-$TIER-$STAMP" \
+              --label "cn.internal.kylin-commit=$KSHA" \
+              --label "cn.internal.buildkit-commit=$BSHA" \
+              --label "cn.internal.suite=$SUITE" \
+              --label "cn.internal.source-date-epoch=$EPOCH" \
+              --label "cn.internal.arch=$a" \
+              --label "cn.internal.glibc=$MG" \
+              --label "cn.internal.libstdcpp=$ML" \
+              --label "cn.internal.glibcxx=$MX" \
+              --label "cn.internal.build-run=$RUNURL" \
+              /tmp
+            echo "── $a 的溯源 label ──"
+            docker inspect "$SRC-labeled" --format '{{json .Config.Labels}}' | tr ',' '\n' | sed 's/^/    /'
+
             for T in "$PFX-$TIER-$a" "$PFX-$TIER-$a-$STAMP"; do
-              docker tag "$SRC" "$REG:$T"
+              docker tag "$SRC-labeled" "$REG:$T"
               docker push "$REG:$T"
-              echo "  推送 $REG:$T"
             done
             pushed="$pushed $REG:$PFX-$TIER-$a"
           done
           [ -n "$pushed" ] || { echo "::error::一个架构都没推成功"; exit 1; }
           printf '%s' "$pushed" > /tmp/pushed.txt
 
-      - name: 合并 manifest list
+      - name: 合并 manifest list 并打印 digest
         env:
           REG: ghcr.io/${{ github.repository_owner }}/${{ inputs.image }}
           PFX: ${{ inputs.tag-prefix }}
           TIER: ${{ inputs.tier }}
+          STAMP: ${{ steps.meta.outputs.stamp }}
         run: |
           set -eu
           SRCS=$(cat /tmp/pushed.txt)
           # manifest list 的隐含契约是各架构变体互为等价物。国产系统的 LoongArch
           # 移植常常是独立产品线（glibc 可能落后一个大版本），那种情况下同一个 tag
-          # 在不同架构下的 ABI 并不一致——这不是错误，但必须在仓库说明里写清楚，
-          # 否则用户会把 amd64 上验过的结论套到别的架构上。
-          docker manifest create "$REG:$PFX-$TIER" $SRCS
-          docker manifest push "$REG:$PFX-$TIER"
-          echo "  manifest $REG:$PFX-$TIER ←$SRCS"
+          # 在不同架构下的 ABI 并不一致——不是错误，但必须在仓库说明里写清楚，
+          # 否则用户会把 amd64 上验过的结论套到别的架构上。镜像 label 里记了实测值。
+          mk() {
+            docker manifest create "$1" $SRCS
+            docker manifest push "$1"
+            echo "  ✔ $1"
+          }
+          mk "$REG:$PFX-$TIER"
+          mk "$REG:$PFX-$TIER-$STAMP"
           # 不带档位后缀的 tag 指向 devel，与 golang:1.21 是完整版的惯例一致
-          if [ "$TIER" = devel ]; then
-            docker manifest create "$REG:$PFX" $SRCS
-            docker manifest push "$REG:$PFX"
-            echo "  manifest $REG:$PFX"
-          fi
-          if [ "${{ inputs.latest }}" = true ]; then
-            docker manifest create "$REG:latest" $SRCS
-            docker manifest push "$REG:latest"
-            echo "  manifest $REG:latest"
-          fi
+          [ "$TIER" = devel ] && mk "$REG:$PFX"
+          [ "${{ inputs.latest }}" = true ] && mk "$REG:latest"
+
+          echo "── 本次发布的 digest（真正的不可变引用）──"
+          for T in "$PFX-$TIER" "$PFX-$TIER-$STAMP"; do
+            D=$(docker buildx imagetools inspect "$REG:$T" --format '{{.Manifest.Digest}}' 2>/dev/null || echo "取不到")
+            echo "  $REG:$T"
+            echo "    → $REG@$D"
+          done
+          echo "  日期 tag 是便利；要钉死请用 @sha256 形式。"

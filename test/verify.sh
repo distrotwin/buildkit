@@ -55,6 +55,7 @@ declare -a XNOTES=()
 # 状态取值：pass / fail / xfail / warn。某个镜像上压根没跑的项在图上是「不适用」，
 # 由汇总阶段按「全部镜像的项集合」减去本镜像已记录的项推出，不在这里编造。
 declare -a CHECKS=()
+_M_GLIBC=""; _M_LIBSTDCPP=""; _M_GLIBCXX=""
 _rec(){ CHECKS+=("$IMG|$1|$2"); }
 # 显式「不适用」：记录状态并给出理由。与「压根没跑到」区分开——后者在矩阵里
 # 同样显示为不适用，但那是推断出来的；这里是我们主动声明的，日志里有理由可查。
@@ -132,6 +133,9 @@ for DID in $DISTROS; do
     out=$(docker run --rm -e http_proxy= -e https_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= \
             -v "$BK/test/inner-checks.sh:/checks.sh:ro" "$IMG" /bin/bash /checks.sh 2>/dev/null)
     g(){ printf '%s' "$out" | awk -F= -v k="$1" '$1==k{print $2; exit}'; }
+    # 记下实测的 ABI 值，供发布阶段写进镜像 label——那样 docker inspect 就能筛 ABI，
+    # 不必把镜像跑起来（跨架构时跑起来还要再装一次 QEMU）。
+    _M_GLIBC=$(g glibc); _M_LIBSTDCPP=$(g libstdcpp); _M_GLIBCXX=$(g glibcxx)
     echo "── $IMG  ($(docker images "$IMG" --format '{{.Size}}'))  $(g os_name)  包=$(g pkgs)"
 
     # L0 结构（所有档都必须过）
@@ -445,7 +449,8 @@ if [ -n "${RESULT_JSON:-}" ]; then
       _first=0
       printf '%s' "$_p" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()),end="")'
     done
-    printf '],"checks":['
+    printf '],"measured":{"glibc":"%s","libstdcpp":"%s","glibcxx":"%s","arch":"%s","tier":"%s"},"checks":[' \
+      "$_M_GLIBC" "$_M_LIBSTDCPP" "$_M_GLIBCXX" "${ARCH:-unknown}" "${TIERS:-}"
     _first=1
     for _c in "${CHECKS[@]:-}"; do
       [ -n "$_c" ] || continue

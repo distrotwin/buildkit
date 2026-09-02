@@ -72,6 +72,33 @@ syscall 79 与 80 是通用 Linux ABI 的 `newfstatat` 与 `fstat`。LoongArch �
 
 **测试必须在干净机器上跑。** 构建阶段的机器状态——builder 容器、本地源、宿主装的包——会掩盖镜像自身的缺陷。测试 job 里只有被测镜像。也因此测试阶段没有 builder 镜像，编门禁二进制会回退到 `debian:13`。
 
+## 发布的 tag 与溯源
+
+```
+ghcr.io/<org>/<image>:v11-devel                滚动，跟随最新构建
+ghcr.io/<org>/<image>:v11                       滚动，= v11-devel
+ghcr.io/<org>/<image>:latest                    滚动，= 最高版本的 devel
+ghcr.io/<org>/<image>:v11-devel-20260902        按 commit 日期，约定不动
+ghcr.io/<org>/<image>:v11-devel-20260902-amd64  单架构，manifest 的成员
+```
+
+日期取**调用方 HEAD 的 committer date（UTC）**而不是构建时刻，这样同一个 commit 无论何时重建都得同一个 tag。
+
+**但要清楚它锁不住什么。** 镜像内容还取决于上游源的包：同一 commit 隔一周重建，若源更新过则产出字节不同，而 tag 相同——这是唯一的失真窗口。抓手是构建时的 `SOURCE_DATE_EPOCH` 取自源 `Release` 的 `Date:` 字段：源没动则重建逐位一致，源动了则镜像 label 里的 epoch 会不同。
+
+**真正的不可变引用是 digest。** GHCR 的 tag 本来就可变，「不可变 tag」是约定而非强制。发布步骤会把每个 tag 的 digest 打出来，要钉死请用 `@sha256:...`。同一天内重复发布会覆盖日期 tag，这是允许的（调试时需要），但发布前会检查该 tag 是否已存在并告警——否则某天有人发现自己钉的 tag 变了，却查不到何时被什么覆盖。
+
+每个镜像都带这些 label，即便 tag 被覆盖，`docker inspect` 也能认出手里的是什么：
+
+| label | 用途 |
+|---|---|
+| `cn.internal.kylin-commit` / `buildkit-commit` | 哪份配置与哪份脚本建的 |
+| `cn.internal.suite` / `source-date-epoch` | 源的哪个快照——两个镜像字节不同时先比这两项 |
+| `cn.internal.glibc` / `libstdcpp` / `glibcxx` / `arch` | **实测**的 ABI 值，不是期望值。不必把镜像跑起来就能筛 |
+| `cn.internal.build-run` | 跳回当时的 CI 日志与测试报告 artifact |
+
+实测 ABI 值取自测试阶段写进结果 JSON 的 `measured` 字段，不在发布阶段重新跑容器——跨架构时跑起来还要再装一次 QEMU。
+
 ## 期望失败（XFAIL）
 
 老系统上有些检查注定红，而且红得有道理，不该算 CI 失败。这类项写进 conf：

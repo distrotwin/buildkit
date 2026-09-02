@@ -77,6 +77,27 @@ jobs:
           echo "装载了 $found 个镜像制品"
           docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | sed 's/^/  /'
 
+      - name: 校验各架构制品互不相同
+        env: { TIER: "${{ inputs.tier }}" }
+        run: |
+          set -eu
+          # 这道门禁是为一次真实事故加的：各架构制品曾共用同一个本地 repo:tag，
+          # docker load 让后装的把 tag 从先装的身上摘走，于是同一份 rootfs 被推成
+          # 三个架构 tag（六次 push 引用同一层），manifest list 照样建得出来、CI 全绿。
+          # 判据取层摘要：架构不同的 rootfs 不可能同层。
+          declare -A seen=()
+          for a in ${{ inputs.arches }}; do
+            REF=$(cat "imgs/img-${{ inputs.distro-id }}-$a-$TIER/image-ref.txt" 2>/dev/null || true)
+            [ -n "$REF" ] || { echo "  跳过 $a：没有该架构的制品"; continue; }
+            docker image inspect "$REF" >/dev/null 2>&1 || { echo "::error::$REF 未装载"; exit 1; }
+            P=$(docker image inspect "$REF" --format '{{.Os}}/{{.Architecture}}')
+            L=$(docker image inspect "$REF" --format '{{json .RootFS.Layers}}' | sha256sum | cut -c1-16)
+            echo "  $a  $REF  平台 $P  层指纹 $L"
+            [ "$P" = "linux/$a" ] || { echo "::error::$REF 的平台戳是 $P，期望 linux/$a"; exit 1; }
+            [ -z "${seen[$L]:-}" ] || { echo "::error::$REF 与 ${seen[$L]} 的层完全相同，本地 tag 撞车了"; exit 1; }
+            seen[$L]=$REF
+          done
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -133,24 +154,45 @@ jobs:
             fi
             SUITE=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SUITE)
 
-            # 溯源信息用一层纯元数据的 build 打进去（不改文件系统）。
-            # 放在这里而不是 import 时，是因为 commit SHA 与 run URL 只有发布阶段才知道，
-            # 而两条构建路径的 import 分处两个脚本——写在那儿又会变成一处对一处错。
-            echo "FROM $SRC" > /tmp/Dockerfile.meta
-            docker build --progress=plain -f /tmp/Dockerfile.meta -t "$SRC-labeled" \
-              --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
-              --label "org.opencontainers.image.revision=$KSHA" \
-              --label "org.opencontainers.image.version=$PFX-$TIER-$STAMP" \
-              --label "cn.internal.kylin-commit=$KSHA" \
-              --label "cn.internal.buildkit-commit=$BSHA" \
-              --label "cn.internal.suite=$SUITE" \
-              --label "cn.internal.source-date-epoch=$EPOCH" \
-              --label "cn.internal.arch=$a" \
-              --label "cn.internal.glibc=$MG" \
-              --label "cn.internal.libstdcpp=$ML" \
-              --label "cn.internal.glibcxx=$MX" \
-              --label "cn.internal.build-run=$RUNURL" \
-              /tmp
+            # 溯源信息在这里打而不是 import 时，是因为 commit SHA 与 run URL 只有发布
+            # 阶段才知道，而两条构建路径的 import 分处两个脚本——写在那儿会变成
+            # 一处对一处错。
+            #
+            # 不能用 docker build 打：BuildKit 解析 FROM 时要求目标平台与本地镜像
+            # 一致，而这个 job 在 amd64 上还要给 arm64/loong64 的镜像打 label，
+            # 于是它绕开本地镜像去拉 docker.io/library/kylin-v4:base，报
+            # pull access denied——看起来像"依赖了 Docker Hub 上的同名镜像"。
+            # docker commit 走守护进程、不经 BuildKit，跨架构可用，且复用原层不新增层。
+            #
+            # 两处要小心：docker create 不能带命令（commit 会把它写成新的 CMD），
+            # 且 commit 记录的是**容器**配置——docker CLI 会把 config.json 里的
+            # proxies 注入成容器环境变量、一并烧进镜像。runner 上没有那份配置，
+            # 但不能靠"没有"来保证，所以打完逐项比对配置与层。
+            CID=$(docker create "$SRC")
+            docker commit \
+              -c "LABEL org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+              -c "LABEL org.opencontainers.image.revision=$KSHA" \
+              -c "LABEL org.opencontainers.image.version=$PFX-$TIER-$STAMP" \
+              -c "LABEL cn.internal.kylin-commit=$KSHA" \
+              -c "LABEL cn.internal.buildkit-commit=$BSHA" \
+              -c "LABEL cn.internal.suite=$SUITE" \
+              -c "LABEL cn.internal.source-date-epoch=$EPOCH" \
+              -c "LABEL cn.internal.arch=$a" \
+              -c "LABEL cn.internal.glibc=$MG" \
+              -c "LABEL cn.internal.libstdcpp=$ML" \
+              -c "LABEL cn.internal.glibcxx=$MX" \
+              -c "LABEL cn.internal.build-run=$RUNURL" \
+              "$CID" "$SRC-labeled" >/dev/null
+            docker rm -f "$CID" >/dev/null
+
+            # 门禁：除 Labels 之外，镜像配置、层、平台必须逐项不变。
+            # Env 排序后比对——只关心集合是否被增删，不关心顺序。
+            cfg(){ docker image inspect "$1" --format '{{json .}}' \
+                   | jq -S '{cfg:(.Config|del(.Labels)|.Env=((.Env//[])|sort)),
+                             layers:.RootFS.Layers, os:.Os, arch:.Architecture}'; }
+            if ! diff <(cfg "$SRC") <(cfg "$SRC-labeled"); then
+              echo "::error::打 label 时改动了 Labels 以外的东西（上面是差异）"; exit 1
+            fi
             echo "── $a 的溯源 label ──"
             docker inspect "$SRC-labeled" --format '{{json .Config.Labels}}' | tr ',' '\n' | sed 's/^/    /'
 
@@ -186,6 +228,20 @@ jobs:
           # 不带档位后缀的 tag 指向 devel，与 golang:1.21 是完整版的惯例一致
           [ "$TIER" = devel ] && mk "$REG:$PFX"
           [ "${{ inputs.latest }}" = true ] && mk "$REG:latest"
+
+          echo "── 校验 manifest list 的平台与成员 ──"
+          # 各架构指向同一份 rootfs 时，manifest list 照样建得出来、CI 照样全绿。
+          # 只有把平台集合和成员 digest 摊开对一遍才看得见——这次就是这么漏出去的。
+          RAW=$(docker buildx imagetools inspect "$REG:$PFX-$TIER" --raw)
+          want=$(for r in $SRCS; do docker image inspect "$r" --format 'linux/{{.Architecture}}'; done | sort | tr '\n' ' ')
+          got=$(printf '%s' "$RAW" | jq -r '.manifests[]|"\(.platform.os)/\(.platform.architecture)"' | sort | tr '\n' ' ')
+          echo "  期望平台: $want"
+          echo "  实际平台: $got"
+          [ "$want" = "$got" ] || { echo "::error::manifest list 的平台集合与推上去的镜像不符"; exit 1; }
+          nm=$(printf '%s' "$RAW" | jq -r '.manifests|length')
+          nd=$(printf '%s' "$RAW" | jq -r '.manifests[].digest' | sort -u | wc -l)
+          [ "$nm" = "$nd" ] || { echo "::error::manifest list 有 $nm 个成员却只有 $nd 个不同 digest，各架构指向了同一份镜像"; exit 1; }
+          echo "  $nm 个成员、$nd 个不同 digest"
 
           echo "── 本次发布的 digest（真正的不可变引用）──"
           for T in "$PFX-$TIER" "$PFX-$TIER-$STAMP"; do

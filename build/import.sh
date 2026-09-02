@@ -9,6 +9,8 @@ ROOT=${ROOT:-$PWD}
 # 「kylin-v11:base 不存在」，看起来像构建没产出 base。
 # selfhost 路径在 build-selfhost.sh 里自己 docker import，不经过本脚本，
 # 于是这个缺陷被两条路径的差异藏了很久。
+BK="${BK:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
+. "$BK/lib/arch.sh"
 DID=${1:?用法: import.sh <did> <tier...>}; shift
 . "$ROOT/distros/$DID.conf"
 
@@ -28,8 +30,14 @@ OPTS=(-c 'CMD ["/bin/bash"]' -c 'ENV LANG=C.UTF-8'
 if tar tf "$TAR" 2>/dev/null | grep -qE '(usr/)?bin/systemctl$'; then
   OPTS+=(-c 'STOPSIGNAL SIGRTMIN+3')
 fi
-docker import "${OPTS[@]}" "$TAR" "$IMAGE:$TIER"
-echo "  导入 $IMAGE:$TIER $(docker images "$IMAGE:$TIER" --format '{{.Size}}')"
+# 平台戳必须显式给。docker import 默认按守护进程的架构写 config，
+# loong64 的 rootfs 在 amd64 runner 上导入就会被标成 linux/amd64，
+# 而 docker manifest create 的平台取自这个字段——manifest list 于是说谎。
+docker import --platform "linux/$ARCH" "${OPTS[@]}" "$TAR" "$IMAGE:$TIER"
+# 后置断言：既查 ARCH 传对了，也查 docker 真的认了这个平台名
+_got=$(docker image inspect "$IMAGE:$TIER" --format '{{.Architecture}}')
+[ "$_got" = "$ARCH" ] || { echo "致命: $IMAGE:$TIER 的架构戳是 $_got，期望 $ARCH"; exit 1; }
+echo "  导入 $IMAGE:$TIER $(docker images "$IMAGE:$TIER" --format '{{.Size}}') 架构 $_got"
 }
 
 for _t in "${@:-micro base devel}"; do import_one "$_t"; done

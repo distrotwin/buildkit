@@ -70,7 +70,12 @@ jobs:
           zstd -d -c ship/image.tar.zst | docker load
           IMG=$(cat ship/image-ref.txt)
           docker image inspect "$IMG" >/dev/null || { echo "::error::装载后镜像 $IMG 不存在"; exit 1; }
-          echo "已装载 $IMG（$(docker images "$IMG" --format '{{.Size}}')）"
+          echo "已装载 $IMG（$(docker images "$IMG" --format '{{.Size}}')）  架构 $(docker image inspect "$IMG" --format '{{.Architecture}}')"
+          # verify.sh 按 conf 里的 IMAGE:TIER 找镜像，而制品的 tag 带架构后缀，
+          # 这里补一个不带后缀的别名给它。测试 job 一次只装一个架构，别名不会撞车。
+          PLAIN="${IMG%-${{ inputs.arch }}}"
+          [ "$PLAIN" != "$IMG" ] || { echo "::error::制品 tag $IMG 没有 -${{ inputs.arch }} 后缀，与构建阶段的约定不一致"; exit 1; }
+          docker tag "$IMG" "$PLAIN"
 
       - name: 冒烟：能不能真正启动
         run: |

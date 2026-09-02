@@ -146,9 +146,16 @@ jobs:
           set -eu
           IMG="$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' IMAGE):${{ inputs.tier }}"
           docker image inspect "$IMG" >/dev/null || { echo "::error::构建声称成功但镜像 $IMG 不存在"; exit 1; }
+          # 传出去的 tag 必须带架构后缀。发布阶段要把同一档位的各架构制品装进同一个
+          # 守护进程，若它们共用 repo:tag，docker load 会把 tag 从先装的那个身上摘走
+          # （日志里只留一句 renaming the old one ... to empty string），于是三个架构
+          # 最终都指向最后装载的那一个，被推成三个架构 tag。这不是假设：v11 的三个档位
+          # 就是这么发出去的，六次 push 引用同一层 93bc1ea4038b，只有 arch label 不同。
+          ARCHIMG="$IMG-$ARCH"
+          docker tag "$IMG" "$ARCHIMG"
           mkdir -p ship
-          docker save "$IMG" | zstd -3 -T0 -o ship/image.tar.zst
-          echo "$IMG" > ship/image-ref.txt
+          docker save "$ARCHIMG" | zstd -3 -T0 -o ship/image.tar.zst
+          echo "$ARCHIMG" > ship/image-ref.txt
           ls -la ship/
 
       - uses: actions/upload-artifact@v4

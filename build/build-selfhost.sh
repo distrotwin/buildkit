@@ -177,9 +177,14 @@ for TIER in $TIERS; do
     if tar tf "$ROOT_HOST/out/$DID-$TIER.tar" 2>/dev/null | grep -qE '(usr/)?bin/systemctl$'; then
       IMPORT_OPTS+=(-c 'STOPSIGNAL SIGRTMIN+3')
     fi
-    docker import "${IMPORT_OPTS[@]}" "$ROOT_HOST/out/$DID-$TIER.tar" "$IMAGE:$TIER" >/dev/null
+    # 平台戳显式给，理由同 import.sh：默认取守护进程架构，跨架构就会标错，
+    # 而 manifest list 的平台正是从这个字段来的
+    docker import --platform "linux/$ARCH" "${IMPORT_OPTS[@]}" \
+      "$ROOT_HOST/out/$DID-$TIER.tar" "$IMAGE:$TIER" >/dev/null
+    _got=$(docker image inspect "$IMAGE:$TIER" --format '{{.Architecture}}')
+    [ "$_got" = "$ARCH" ] || { log "致命: $IMAGE:$TIER 的架构戳是 $_got，期望 $ARCH"; exit 1; }
     docker rm -f "$C" >/dev/null 2>&1 || true
-    log "[$DID/$TIER] 完成 -> $IMAGE:$TIER $(docker images "$IMAGE:$TIER" --format '{{.Size}}')"
+    log "[$DID/$TIER] 完成 -> $IMAGE:$TIER $(docker images "$IMAGE:$TIER" --format '{{.Size}}') 架构 $_got"
   else
     docker rm -f "$C" >/dev/null 2>&1 || true
     log "[$DID/$TIER] 失败"; exit 1

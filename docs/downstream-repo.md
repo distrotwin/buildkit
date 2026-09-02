@@ -116,6 +116,17 @@ b=$(basename "$f"); [ "${b%%-*}" = "$D" ]
 
 **`EXPECT_*` 宁可填推导值也不要留空。** 留空会因「期望空 == 实际空」被判通过，等于这一项验收不存在。填错会让门禁当场报错，那是好事。
 
+**切片种子必须对着盘内清单逐个核，不能照抄另一个版本。** UOS V20 的种子照抄了 V25，而 Debian 10 那一代的装机清单里没有 `zstd`，直到切 base 档时才报「依赖未解析」。ISO 里就带着完整的装机清单（V20 是 `live/filesystem.manifest`，V25 是 `live/filesystem.packages`），用 `tools/iso9660.py` 直读几十 KB 就能核完，成本远低于跑一小时抽盘再失败：
+
+```python
+import sys; sys.path.insert(0, 'buildkit/tools')
+from iso9660 import ISO
+iso = ISO("<ISO 直链>")
+e = iso.find("live/filesystem.manifest")          # V25 用 live/filesystem.packages
+have = {l.split()[0].split(':')[0] for l in iso.cat(e).decode().splitlines() if l.split()}
+print([s for s in SEEDS if s not in have])        # 应为空
+```
+
 **按架构不同的基线一定要写条件覆写。** 同一个大版本的 LoongArch 移植常常是独立产品线：麒麟 V10 SP1 的 loong 支是 Loongnix 血脉、glibc 2.28 + gcc 8.3，比 amd64 的 2.31 + gcc 9.3 落后一代；V11 两支编译器相同而 libstdc++ 差一档。用同一套基线会把差异掩盖掉。
 
 ## 四、workflow 组织

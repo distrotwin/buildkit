@@ -22,16 +22,28 @@ e = iso.find(path) or sys.exit(f'ISO 里找不到 {path}')
 off, size = e['lba'] * 2048, e['size']
 print(f'squashfs: offset={off} size={size} ({size/2**30:.2f} GiB) -> {out}', flush=True)
 
-if os.path.exists(out) and os.path.getsize(out) == size:
-    print('  已存在且大小一致，跳过下载', flush=True)
-else:
-    rc = subprocess.call(['curl', '-fsS', '--no-alpn', '-L', '--max-time', '7200',
-                          '--speed-limit', '10240', '--speed-time', '120',
-                          '--retry', '3', '--retry-delay', '5', '--retry-all-errors',
-                          '-r', f'{off}-{off+size-1}', '-o', out, url])
-    if rc != 0: sys.exit(f'curl 抽取失败 rc={rc}')
-    if os.path.getsize(out) != size:
-        sys.exit(f'抽出的字节数不符：期望 {size} 实际 {os.path.getsize(out)}')
+# 续传自己做，不能交给 curl 的 --retry。这是个抽 Range 的下载，curl 重试时会
+# 按原 -r 从头再来；3 GiB 的盘在 1 MB/s 下要将近一小时，一次卡顿就白费一小时。
+# 实测就是这么白费过一次。所以按已落地字节数重算区间，追加写入。
+have = os.path.getsize(out) if os.path.exists(out) else 0
+if have > size:
+    print(f'  已有文件比目标还大（{have} > {size}），重来', flush=True)
+    os.remove(out); have = 0
+tries = 0
+while have < size:
+    tries += 1
+    if tries > 12: sys.exit(f'!! 续传 {tries-1} 轮仍未取满：已 {have} / 目标 {size}')
+    print(f'  取 {have}..{size}（第 {tries} 轮，已有 {have*100//size}%）', flush=True)
+    with open(out, 'ab') as fh:
+        rc = subprocess.call(['curl', '-fsS', '--no-alpn', '-L', '--max-time', '7200',
+                              '--speed-limit', '10240', '--speed-time', '120',
+                              '-r', f'{off+have}-{off+size-1}', url], stdout=fh)
+    now = os.path.getsize(out)
+    if now == have:
+        sys.exit(f'!! 第 {tries} 轮一个字节都没进（rc={rc}），判定源端不可用')
+    have = now
+if have == size:
+    print(f'  取满 {size} 字节', flush=True)
 
 h = hashlib.sha256()
 with open(out, 'rb') as f:

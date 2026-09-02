@@ -125,16 +125,34 @@ xfail 计入检查总数。不计的话「加豁免」就等于「让基线下�
 
 ## 下游仓库怎么接
 
+**新建一个 OS 仓库前先读 [`docs/downstream-repo.md`](docs/downstream-repo.md)。** 那是下游仓库的建设规范，覆盖从上游研究取材、仓库形态、workflow 组织、脚本归属、门禁、README 与 CLAUDE.md 的写法，到发布验收与上线检查清单的全流程。`distrotwin/kylin` 是这套规范的第一个实现，后来的仓库照它建。
+
 ```
 你的仓库/
-├── buildkit/              ← submodule，钉住一个 commit
-├── distros/v11.conf
-└── .github/workflows/build.yml
+├── buildkit/                     ← submodule，钉住一个 commit
+├── distros/<did>.conf
+├── .github/workflows/build.yml
+├── README.md
+├── CLAUDE.md
+├── AGENTS.md -> CLAUDE.md        ← 符号链接，不是副本
+└── .gitignore
 ```
 
-submodule 钉 commit 是刻意的：升级 buildkit 是一次显式提交，不会某天上游一改就让所有 OS 仓库集体漂移。
+五份起始文件在 [`templates/`](templates/) 里，先复制再改：
 
-`distros/*.conf` 需要提供的键见 `docs/distro-conf.md`。最少要有 `DID` `FAMILY` `METHOD` `MIRROR` `SUITE` `COMPONENTS`，以及三档各自的 `*_INCLUDE`。
+| 模板 | 复制到 |
+|---|---|
+| `templates/distro.conf` | `distros/<did>.conf` |
+| `templates/build.yml` | `.github/workflows/build.yml` |
+| `templates/README.md` | `README.md` |
+| `templates/CLAUDE.md` | `CLAUDE.md` |
+| `templates/gitignore` | `.gitignore` |
+
+submodule 钉 commit 是刻意的：升级 buildkit 是一次显式提交，不会某天上游一改就让所有 OS 仓库集体漂移。submodule 与 `uses: ...@<sha>` 两处 pin 必须同步，`build-one.yml` 第一步会断言。
+
+`distros/*.conf` 的字段契约见 [`docs/distro-conf.md`](docs/distro-conf.md)。
+
+改本仓库本身，读 [`CLAUDE.md`](CLAUDE.md)。
 
 ## 厂商镜像站的两类坑
 

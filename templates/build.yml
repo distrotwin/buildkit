@@ -1,0 +1,158 @@
+# .github/workflows/build.yml —— 下游仓库唯一的 workflow
+#
+# 它只做两件事：定义矩阵、调用 buildkit 的可复用 workflow。任何实现都不写在这里。
+# 以 distrotwin/kylin 为原型，改动前先读 buildkit/docs/downstream-repo.md 第四节。
+#
+# 填空处：<did*> 版本标识、<镜像名> GHCR 仓库名、<BUILDKIT_SHA> submodule 钉的那个 commit。
+# <BUILDKIT_SHA> 必须与 submodule 的 HEAD 一致，build-one.yml 第一步会断言。
+
+name: 构建镜像
+
+# 只允许手动触发。构建一次要跑二十个 job、拉几个 GB，提交自动触发既费额度也
+# 没必要——真正需要的是「我要出一批镜像了」这个显式动作。
+#
+# 阶段：
+#   build    版本 × 架构 × 档位，一个 job 只建一个镜像
+#   test     全部构建完成后解锁，逐个装载、真启动、跑完整检查集
+#   report   每个系统一份 markdown 报告 + 一份含完整日志的 artifact
+#   publish  独立于 build/test，只有显式勾选 publish 时才跑
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "测试全绿后发布到 GHCR（默认不发布）"
+        type: boolean
+        default: false
+      include-loongarch:
+        description: "把 V11 的 loong64 一并构建（需 QEMU 模拟，较慢）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ── 原生架构。GitHub 的 amd64 与 arm64 runner 都是原生，不需要模拟
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        did: [<did1>, <did2>]
+        arch: [amd64, arm64]
+        tier: [micro, base, devel]
+    uses: distrotwin/buildkit/.github/workflows/build-one.yml@<BUILDKIT_SHA>
+    with:
+      distro-id: ${{ matrix.did }}
+      arch:      ${{ matrix.arch }}
+      tier:      ${{ matrix.tier }}
+      runner:    ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+
+  # ── LoongArch。没有托管 runner，只能在 amd64 上用 QEMU 模拟，故默认关闭。
+  #
+  # 只有 V11 的 loong64 在列。V10 SP1 的 loongarch64 已实测排除：它是旧世界 ABI，
+  # glibc 2.28 仍在调用 syscall 79/80（newfstatat / fstat），而 LoongArch 新世界把
+  # 这两个调用去掉了，上游 QEMU 的 loongarch64 target 因此没有实现。最小 rootfs
+  # 实跑的表现是打开 libtinfo.so.6、读出 ELF 头后报 Unknown syscall 80 退出 127。
+  # 没有龙芯补丁版 QEMU 或真机就造不出来，所以不列入而不是留着让它失败。
+  #
+  # V11 的 loong64 通过了同一项 smoke test：bash 正常退出，内建 MACHTYPE 为
+  # loongarch64-unknown-linux-gnu（编译期烧进二进制，可证明执行的是目标架构产物）。
+  # 但跑通一个 bash 不等于跑得完一次 bootstrap，完整构建要在模拟下执行几百个
+  # 维护者脚本，所以仍需显式勾选。
+  build-loong:
+    if: inputs.include-loongarch
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [micro, base, devel]
+    uses: distrotwin/buildkit/.github/workflows/build-one.yml@<BUILDKIT_SHA>
+    with:
+      distro-id:  v11
+      arch:       loong64
+      tier:       ${{ matrix.tier }}
+      # 这里必须用 24.04 而不是照惯例取最低版本：LoongArch 的用户态模拟是
+      # QEMU 7.1 才加的，而 Ubuntu 22.04 只带 6.2，binfmt 里根本没有
+      # qemu-loongarch64 条目。实测报错是「loong64 can neither be executed
+      # natively nor via qemu user emulation」，那句话不提版本，很容易被当成
+      # binfmt 没装。产物是 loong64 的，与宿主发行版新旧无关。
+      runner:     ubuntu-24.04
+      needs-qemu: true
+      # 模拟构建慢得多：micro 档在 QEMU 下就要 322 秒，devel 带 build-essential
+      # 更重。此前按原生的 60 分钟给，devel 恰好被掐在 61 分钟处反复重试。
+      # 150 × 2 = 300 分钟，留在单 job 的 6 小时上限内。
+      timeout-minutes: 150
+      max-attempts: 2
+
+  # if: always() —— 某个镜像没建出来，其余镜像的测试结论仍然有价值，
+  # 报告要完整而不是一挂全无。缺的那几份由汇总阶段的 expected 抓。
+  test:
+    needs: [build, build-loong]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        did: [<did1>, <did2>]
+        arch: [amd64, arm64]
+        tier: [micro, base, devel]
+    uses: distrotwin/buildkit/.github/workflows/test-one.yml@<BUILDKIT_SHA>
+    with:
+      distro-id: ${{ matrix.did }}
+      arch:      ${{ matrix.arch }}
+      tier:      ${{ matrix.tier }}
+      runner:    ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+
+  test-loong:
+    needs: [build-loong]
+    if: always() && inputs.include-loongarch
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [micro, base, devel]
+    uses: distrotwin/buildkit/.github/workflows/test-one.yml@<BUILDKIT_SHA>
+    with:
+      distro-id:  v11
+      arch:       loong64
+      tier:       ${{ matrix.tier }}
+      runner:     ubuntu-24.04   # 同上：22.04 的 QEMU 6.2 不支持 LoongArch
+      needs-qemu: true           # 测试阶段也要 docker run 被测镜像，binfmt 两个阶段各需一次
+
+  # expected 是结构性守卫：某个 job 在跑到检查前就挂掉不会产出结果，检查总数会
+  # 「合法地」变低而基线放过它，结果数对不上则一定抓得住。
+  # 勾了 loong 就多三份，所以这个数要跟着算而不是写死。
+  report:
+    needs: [test, test-loong]
+    if: always()
+    uses: distrotwin/buildkit/.github/workflows/report.yml@<BUILDKIT_SHA>
+    with:
+      distros:  "v4 v10sp1 v11"
+      expected: ${{ inputs.include-loongarch && 21 || 18 }}
+      baseline: ${{ inputs.include-loongarch && 870 || 750 }}
+
+  # ── 发布。独立于 build/test，只有显式勾选才跑，且要求 report 真的通过。
+  # 镜像一旦推上 GHCR 就公开可拉，这一步不该由日常构建顺带触发。
+  publish:
+    needs: [test, report]
+    if: inputs.publish && needs.test.result == 'success' && needs.report.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { did: v4,     prefix: v4,     tier: micro, latest: false }
+          - { did: v4,     prefix: v4,     tier: base,  latest: false }
+          - { did: v4,     prefix: v4,     tier: devel, latest: false }
+          - { did: v10sp1, prefix: v10sp1, tier: micro, latest: false }
+          - { did: v10sp1, prefix: v10sp1, tier: base,  latest: false }
+          - { did: v10sp1, prefix: v10sp1, tier: devel, latest: false }
+          - { did: v11,    prefix: v11,    tier: micro, latest: false }
+          - { did: v11,    prefix: v11,    tier: base,  latest: false }
+          # latest 指向最高版本的 devel
+          - { did: v11,    prefix: v11,    tier: devel, latest: true }
+    uses: distrotwin/buildkit/.github/workflows/publish-one.yml@<BUILDKIT_SHA>
+    with:
+      distro-id:  ${{ matrix.did }}
+      tier:       ${{ matrix.tier }}
+      image:      <镜像名>
+      tag-prefix: ${{ matrix.prefix }}
+      arches:     ${{ inputs.include-loongarch && matrix.did == 'v11' && 'amd64 arm64 loong64' || 'amd64 arm64' }}
+      latest:     ${{ matrix.latest }}

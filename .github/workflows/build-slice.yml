@@ -16,7 +16,10 @@ on:
       runner:    { type: string, required: true }
       tiers:     { type: string, default: "micro base devel" }
       harvest:   { type: boolean, default: false, description: "只采 squashfs 指纹，不构建" }
-      timeout-minutes: { type: number, default: 120 }
+      # 实测：GitHub runner 到这个国内 CDN 约 1 MB/s，3 GiB 的 squashfs 要 57~59 分钟。
+      # 默认给到 240 分钟是为了让单次尝试足够跑完——超时重来不会续传，
+      # 已下的几个 G 会白费，所以宁可把单次窗口开够，retry 只留给真正的传输中断。
+      timeout-minutes: { type: number, default: 240 }
       max-attempts:    { type: number, default: 2 }
 
 permissions:

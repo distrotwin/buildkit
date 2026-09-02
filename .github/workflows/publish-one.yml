@@ -182,11 +182,25 @@ jobs:
               "$CID" "$SRC-labeled" >/dev/null
             docker rm -f "$CID" >/dev/null
 
-            # 门禁：除 Labels 之外，镜像配置、层、平台必须逐项不变。
-            # Env 排序后比对——只关心集合是否被增删，不关心顺序。
-            cfg(){ docker image inspect "$1" --format '{{json .}}' \
-                   | jq -S '{cfg:(.Config|del(.Labels)|.Env=((.Env//[])|sort)),
-                             layers:.RootFS.Layers, os:.Os, arch:.Architecture}'; }
+            # 门禁：显式列出「必须不变」的语义字段，逐项比对。
+            # 不能写成「除 Labels 外全等」——docker commit 记录的是容器，
+            # Hostname（容器 ID）、Image（父镜像引用）、AttachStdout/Stderr
+            # 这些运行时记账字段本来就会变，与镜像语义无关。实测踩过：本机
+            # docker 29.7 不动它们，runner 上会动，九个 job 全卡在这。
+            # Env 排序后比对——只关心集合有没有被增删，不关心顺序。
+            cfg(){ docker image inspect "$1" --format '{{json .}}' | jq -S '{
+                     env:        ((.Config.Env//[])|sort),
+                     cmd:        .Config.Cmd,
+                     entrypoint: .Config.Entrypoint,
+                     user:       .Config.User,
+                     workdir:    .Config.WorkingDir,
+                     stopsignal: .Config.StopSignal,
+                     argsescaped:.Config.ArgsEscaped,
+                     volumes:    .Config.Volumes,
+                     ports:      .Config.ExposedPorts,
+                     layers:     .RootFS.Layers,
+                     os:         .Os,
+                     arch:       .Architecture }'; }
             if ! diff <(cfg "$SRC") <(cfg "$SRC-labeled"); then
               echo "::error::打 label 时改动了 Labels 以外的东西（上面是差异）"; exit 1
             fi

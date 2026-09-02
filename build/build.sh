@@ -172,8 +172,23 @@ build_slice() {
   fi
   # 判据看结果不看手段：镜像里得真有 zh_CN，搬来的还是现生成的无所谓。
   # 运行时的权威判定在 verify 的 locale_zh（`locale -a`），这里只做一道早失败。
-  [ -d "$D/usr/lib/locale/zh_CN.utf8" ] || [ -s "$D/usr/lib/locale/locale-archive" ] \
-    || die "[$DID/$TIER] 镜像里没有 zh_CN locale：源 rootfs 无 usr/lib/locale，localedef 也没跑成"
+  if [ -d "$D/usr/lib/locale/zh_CN.utf8" ] || [ -s "$D/usr/lib/locale/locale-archive" ]; then
+    log "  zh_CN locale 就绪"
+  else
+    # 暂为告警而非致命：v20/amd64 上 localedef 无法 exec 而同版本 arm64 正常，
+    # 差别在盘里而不在代码里。先把现场打全，运行时的判定交给 verify 的 locale_zh。
+    echo "::warning::[$DID/$TIER] 镜像里没有 zh_CN locale——下面是现场"
+    for x in "$D/usr/bin/localedef" "$D/usr/sbin/locale-gen" "$D/usr/bin/locale"; do
+      printf "    slice %s: " "${x#$D}"; ls -ld "$x" 2>&1 | tail -1
+      [ -L "$x" ] && printf "      -> %s（目标在 slice 内%s）\n" "$(readlink "$x")" \
+         "$([ -e "$D$(readlink -m /"$(readlink "$x")")" ] && echo 存在 || echo 缺失)"
+    done
+    for x in "$SRC_ROOTFS/usr/bin/localedef" "$SRC_ROOTFS/usr/lib/locale"; do
+      printf "    源 %s: " "${x#$SRC_ROOTFS}"; ls -ld "$x" 2>&1 | tail -1
+    done
+    printf "    源 /usr/lib/locale 内容: "; ls "$SRC_ROOTFS/usr/lib/locale" 2>&1 | head -5 | tr "\n" " "; echo
+    printf "    slice 内 i18n/locales 有无 zh_CN: "; ls -ld "$D/usr/share/i18n/locales/zh_CN" 2>&1 | tail -1
+  fi
   slim_locales "$D"
   make_tarball "$D" "$OUT"
 }

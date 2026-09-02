@@ -1,0 +1,150 @@
+name: 阶段一 · 切片路径：一个「版本 × 架构」的三个档位
+
+# 与 build-one.yml 的分工：那份是「一个 job 一个镜像」，适用于构建代价与档位数
+# 成正比的路径（mmdebstrap / selfhost）。切片路径不一样——抽 squashfs 加
+# unsquashfs 是一次昂贵的共享前置（V20 的 squashfs 就有 3.7 GiB），三个档位各做
+# 一遍等于白花两遍，而解开后的 rootfs 又塞不进 actions/cache 的 10 GB 上限。
+# 所以这里按「版本 × 架构」切分，一个 job 出三个镜像。
+#
+# 只放宽构建粒度，不放宽测试粒度：测试仍是一镜像一 job、干净机器装载，
+# 「构建机状态会掩盖镜像缺陷」这条性质守在测试端，那才是要紧的地方。
+on:
+  workflow_call:
+    inputs:
+      distro-id: { type: string, required: true }
+      arch:      { type: string, required: true }
+      runner:    { type: string, required: true }
+      tiers:     { type: string, default: "micro base devel" }
+      harvest:   { type: boolean, default: false, description: "只采 squashfs 指纹，不构建" }
+      timeout-minutes: { type: number, default: 120 }
+      max-attempts:    { type: number, default: 2 }
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+
+      - name: 核对 submodule 与 workflow 同版本
+        run: |
+          set -eu
+          have=$(git -C buildkit rev-parse HEAD)
+          want=$(grep -rhoE 'buildkit/\.github/workflows/[a-z-]+\.yml@[0-9a-f]{40}' .github/workflows/ \
+                 | grep -oE '[0-9a-f]{40}$' | sort -u)
+          n=$(printf '%s\n' "$want" | grep -c . || true)
+          [ "$n" = "1" ] || { echo "::error::uses: 指向了 $n 个不同的 buildkit commit"; printf '%s\n' "$want"; exit 1; }
+          [ "$have" = "$want" ] || { echo "::error::submodule($have) 与 workflow($want) 不是同一个 commit"; exit 1; }
+
+      - name: 环境准备与腾磁盘
+        env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
+        run: |
+          set -eu
+          echo "── 初始磁盘 ──"; df -h / /mnt 2>/dev/null || df -h /
+          # 切片要同时放下 squashfs 与解开的 rootfs，runner 自带的语言运行时占了十几个 G。
+          # 这些在本项目里一个都用不到，删掉换空间。
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/share/swift "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools zstd curl python3 file
+          echo "── 腾出后 ──"; df -h /
+
+      - name: 抽 squashfs 并校验
+        uses: nick-fields/retry@v4.0.0
+        env:
+          ARCH: ${{ inputs.arch }}
+          ROOT: ${{ github.workspace }}
+          BK:   ${{ github.workspace }}/buildkit
+          HARVEST: ${{ inputs.harvest && '1' || '0' }}
+        with:
+          timeout_minutes: ${{ inputs.timeout-minutes }}
+          max_attempts: ${{ inputs.max-attempts }}
+          retry_wait_seconds: 30
+          shell: bash
+          command: |
+            set -eu
+            U=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' ISO_URL)
+            P=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' ISO_SQUASHFS_PATH)
+            S=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SQUASHFS_SHA256)
+            echo "ISO: $U"
+            t0=$(date +%s)
+            python3 buildkit/tools/fetch-squashfs.py "$U" "$P" \
+              "iso/${{ inputs.distro-id }}-${{ inputs.arch }}-filesystem.squashfs" "$S" | tee /tmp/fetch.out
+            echo "抽取耗时 $(( $(date +%s) - t0 )) 秒"
+
+      - name: 报告指纹（采集模式）
+        if: inputs.harvest
+        run: |
+          set -eu
+          SHA=$(grep -oE 'HARVEST_SHA256=[0-9a-f]{64}' /tmp/fetch.out | cut -d= -f2)
+          [ -n "$SHA" ] || { echo "::error::没采到指纹"; exit 1; }
+          {
+            echo "### ${{ inputs.distro-id }} / ${{ inputs.arch }}"
+            echo '```'
+            echo "SQUASHFS_SHA256=$SHA"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::${{ inputs.distro-id }}/${{ inputs.arch }} SQUASHFS_SHA256=$SHA"
+          df -h /
+
+      - name: 解包切片源
+        if: ${{ !inputs.harvest }}
+        env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}", BK: "${{ github.workspace }}/buildkit" }
+        run: |
+          set -eu
+          t0=$(date +%s)
+          sudo -E buildkit/tools/prepare-slice-src.sh '${{ inputs.distro-id }}'
+          echo "unsquashfs 耗时 $(( $(date +%s) - t0 )) 秒"
+          df -h /
+
+      - name: 切出各档位
+        if: ${{ !inputs.harvest }}
+        env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}", BK: "${{ github.workspace }}/buildkit" }
+        run: |
+          set -eu
+          sudo -E ARCH="$ARCH" ROOT="$ROOT" BK="$BK" \
+            buildkit/build/build.sh '${{ inputs.distro-id }}' ${{ inputs.tiers }}
+          sudo -E ARCH="$ARCH" ROOT="$ROOT" BK="$BK" \
+            buildkit/build/import.sh '${{ inputs.distro-id }}' ${{ inputs.tiers }}
+          df -h /
+
+      - name: 导出镜像
+        if: ${{ !inputs.harvest }}
+        env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
+        run: |
+          set -eu
+          IMG=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' IMAGE)
+          for t in ${{ inputs.tiers }}; do
+            docker image inspect "$IMG:$t" >/dev/null || { echo "::error::构建声称成功但镜像 $IMG:$t 不存在"; exit 1; }
+            # tag 必须带架构后缀，理由见 build-one.yml 同名步骤
+            docker tag "$IMG:$t" "$IMG:$t-$ARCH"
+            mkdir -p "ship/$t"
+            docker save "$IMG:$t-$ARCH" | zstd -3 -T0 -o "ship/$t/image.tar.zst"
+            echo "$IMG:$t-$ARCH" > "ship/$t/image-ref.txt"
+            ls -la "ship/$t/"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.harvest }}
+        with:
+          name: img-${{ inputs.distro-id }}-${{ inputs.arch }}-micro
+          path: ship/micro/
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.harvest }}
+        with:
+          name: img-${{ inputs.distro-id }}-${{ inputs.arch }}-base
+          path: ship/base/
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.harvest }}
+        with:
+          name: img-${{ inputs.distro-id }}-${{ inputs.arch }}-devel
+          path: ship/devel/
+          retention-days: 1
+          compression-level: 0

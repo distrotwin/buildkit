@@ -100,12 +100,18 @@ jobs:
           set -eu
           D='${{ matrix.did }}'
           mkdir -p "bundle/$D"
-          [ -f "reports/report-$D.md" ] && cp "reports/report-$D.md" "bundle/$D/"
+          if [ -f "reports/report-$D.md" ]; then cp "reports/report-$D.md" "bundle/$D/"; fi
           # 按 did 归拢必须精确取第一个 - 之前的字段，不能用 "$D-*" 通配：
           # v10 是 v10sp1 的前缀，通配会把 v10sp1 的日志一并收进 v10 的包。
+          #
+          # 条件拷贝必须写成 if 而不是 [ ... ] && cp：后者是循环体最后一句时，
+          # 最后一个文件若不属于本 did 就返回 1，while 跟着返回 1，管道返回 1，
+          # bash -e 直接判这一步失败。实际表现是制品已经正确生成并上传，
+          # 步骤却红着退出——而且只有「自己的文件恰好排在 find 输出末尾」的那个
+          # did 会侥幸通过，看起来像随机失败。
           find incoming -type f \( -name '*.log' -o -name '*.json' \) | while read -r f; do
             b=$(basename "$f")
-            [ "${b%%-*}" = "$D" ] && cp "$f" "bundle/$D/"
+            if [ "${b%%-*}" = "$D" ]; then cp "$f" "bundle/$D/"; fi
           done
           echo "$D: $(ls -1 "bundle/$D" | wc -l) 个文件"
           ls -1 "bundle/$D" | sed 's/^/  /'

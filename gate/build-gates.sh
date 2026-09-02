@@ -35,6 +35,11 @@ trap 'docker rm -f "$C" >/dev/null 2>&1 || true' EXIT
 # 目标架构与宿主不同时必须交叉编译：门禁二进制要放进目标镜像里执行，
 # 按宿主架构编出来的塞进去只会得到 "exec ...: no such file or directory"，
 # 那句话看起来像文件缺失，实际是 ELF 的解释器对不上。
+# 编译器名一律用 docker exec -e 注入容器，不靠外层引号展开。
+# 踩过：t_high 那行是双引号（在宿主展开，对的），t_high_cxx 那行在单引号的
+# heredoc 块里（传进容器才展开，而容器里没有 CXX），于是展开成空、
+# -O2 被当成命令名，报 "bash: line 15: -O2: command not found"。
+# 两处写法不一致时，一处对一处错，而报错离真因很远。
 HOST_ARCH=$(dpkg --print-architecture)
 TGT=${ARCH:-$HOST_ARCH}
 case "$TGT" in
@@ -54,9 +59,9 @@ docker run -d --name "$C" -e http_proxy= -e https_proxy= "$BUILDER_IMG" sleep 60
 docker exec "$C" bash -c "apt-get update && apt-get install -y --no-install-recommends $PKG"
 
 docker exec -i "$C" bash -c 'cat > /t.cpp' < "$ROOT/gate/t.cpp"   # -i 必须有，否则 stdin 不接、源文件是空的
-docker exec "$C" bash -c "$CXX -O2 -o /t_high /t.cpp"
+docker exec -e CXX="$CXX" "$C" bash -c '$CXX -O2 -o /t_high /t.cpp'
 
-docker exec "$C" bash -c 'cat > /cxx.cpp <<CPP
+docker exec -e CXX="$CXX" "$C" bash -c 'cat > /cxx.cpp <<CPP
 // std::to_chars 的浮点重载在 GCC 11 才落地，对应较高的 GLIBCXX 版本 ——
 // 这正是我们需要的「高 C++ 地板」：麒麟 V10（GLIBCXX_3.4.28）应当跑不了，
 // 麒麟 V11 / UOS V25 应当能跑。具体需要哪个版本以 objdump 实测为准，不靠猜。

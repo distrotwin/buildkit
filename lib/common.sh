@@ -292,6 +292,11 @@ slim_locales() {
       ! -name 'zh_CN*' ! -name 'en*' ! -name 'C*' -exec rm -rf {} + 2>/dev/null || true
   [ -d "$R/usr/share/i18n/charmaps" ] && find "$R/usr/share/i18n/charmaps" -type f \
       ! -name 'UTF-8*' -delete 2>/dev/null || true
+  # /usr/lib/locale 里的目录式 locale 同样只留 UTF-8。切片会从源 rootfs 整个搬来，
+  # 而统信 V20 的盘里带着 zh_CN（gb2312）、zh_CN.gb18030、zh_CN.gbk 三个遗留编码，
+  # 构建测试环境用不到，留着还会让 locale_zh 的计数从 1 变成 4。
+  [ -d "$R/usr/lib/locale" ] && find "$R/usr/lib/locale" -mindepth 1 -maxdepth 1 -type d \
+      ! -name '*.utf8' ! -name '*.UTF-8' -exec rm -rf {} + 2>/dev/null || true
 }
 
 # 确定性打包：时间戳归一到 SOURCE_DATE_EPOCH，条目按名排序，剔除 atime/ctime，

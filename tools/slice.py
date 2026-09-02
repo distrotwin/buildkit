@@ -252,6 +252,14 @@ def main():
     dd = os.path.join(dst, admin)
     os.makedirs(os.path.join(dd, 'info'), exist_ok=True)
     os.makedirs(os.path.join(dd, 'updates'), exist_ok=True)
+    # dpkg 1.19 的只读操作（含 --audit）会去打开锁文件而**不创建**它，缺了就报
+    # 「unable to check lock file for dpkg database directory: No such file or
+    # directory」。锁是运行时状态、不属于任何包，切片必然漏；源盘里有没有全看
+    # 它出厂前跑没跑过 dpkg（V20 的 arm64 盘有、amd64 盘没有，于是只有 amd64 报错）。
+    for lk in ('lock', 'lock-frontend'):
+        lp = os.path.join(dd, lk)
+        if not os.path.exists(lp):
+            open(lp, 'w').close(); os.chmod(lp, 0o640)
     open(os.path.join(dd, 'available'), 'a').close()
     # diversions / statoverride 必须从源带过来（按 keep 过滤），不能建成空文件：
     #   diversions  记录 dpkg-divert 的改道，UOS 的 /usr/bin/dpkg -> dpkg.real 就是一条
@@ -286,10 +294,20 @@ def main():
                     except Exception: pass
     with open(os.path.join(dd, 'status'), 'w', encoding='utf-8') as out:
         raw = open(status, encoding='utf-8', errors='replace').read()
+        n_drop = 0
         for blk in raw.split('\n\n'):
             m = re.search(r'^Package: (\S+)', blk, re.M)
-            if m and m.group(1) in keep:
-                out.write(blk.rstrip('\n') + '\n\n')
+            if not (m and m.group(1) in keep): continue
+            # 只写真正切进来的那一条。多架构系统上同名包有多条 status 记录，
+            # 而我们只搬了本机架构的 .list；把外来架构那条一并写进去，dpkg --audit
+            # 就会报「missing the list control file，需要重装」——一条没被搬的
+            # i386 记录足以让整个 audit 判为不干净。
+            want = pkgs[m.group(1)].get('Architecture', '')
+            am = re.search(r'^Architecture: (\S+)', blk, re.M)
+            if want and am and am.group(1) != want:
+                n_drop += 1; continue
+            out.write(blk.rstrip('\n') + '\n\n')
+        if n_drop: print(f"  status 丢弃 {n_drop} 条外来架构记录（其 .list 未随切片搬入）")
     for n in keep:
         arch = pkgs[n].get('Architecture', '')
         for base in (f'{n}:{arch}', n):

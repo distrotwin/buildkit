@@ -98,6 +98,10 @@ build_slice() {
   for d in etc/ld.so.conf.d etc/pam.d etc/ssl etc/apt/apt.conf.d usr/share/ca-certificates usr/share/i18n; do
     if [ -d "$SRC_ROOTFS/$d" ]; then mkdir -p "$D/$d"; cp -a "$SRC_ROOTFS/$d/." "$D/$d/" 2>/dev/null || true; fi
   done
+  # 整目录搬会把指向未入选包的软链一起带进来（V20 的
+  # etc/ld.so.conf.d/com.canon.ufr2.conf 指向没进切片的佳能打印驱动）。
+  # 留着它 ldconfig 每次都告警，验收也会报「清单外悬空软链」。
+  find "$D/etc" -xtype l -print -delete 2>/dev/null | sed "s|^|  清掉悬空软链 |" || true
   # UOS V25 把真二进制改名成 *.real，再把 dpkg/apt/apt-get 换成 deepin-immutable-ctl
   # 适配器。容器里没有 OSTree 部署，适配器必然失败，因此指回真二进制。
   # 这是与真机的**有意偏差**，已在 README 记录；好处是 dpkg 查询/本地装包可用。
@@ -157,10 +161,12 @@ build_slice() {
   fi
   # locale 归档与 ld.so.cache 同类：postinst 产物，不属于任何包，切片必漏。
   # 先从源 rootfs 搬现成的——真机装完就有，比在 chroot 里现生成可靠得多。
-  if [ -d "$SRC_ROOTFS/usr/lib/locale" ] && [ ! -e "$D/usr/lib/locale" ]; then
-    mkdir -p "$D/usr/lib"
-    cp -a "$SRC_ROOTFS/usr/lib/locale" "$D/usr/lib/" 2>/dev/null || true
-    log "  从源 rootfs 搬入 usr/lib/locale"
+  # 守卫不能写成「目标目录不存在才搬」：切片会按包的文件清单建出**空的**
+  # /usr/lib/locale，-e 为真于是整段跳过。改为合并内容。
+  if [ -d "$SRC_ROOTFS/usr/lib/locale" ]; then
+    mkdir -p "$D/usr/lib/locale"
+    cp -an "$SRC_ROOTFS/usr/lib/locale/." "$D/usr/lib/locale/" 2>/dev/null || true
+    log "  合并源 rootfs 的 usr/lib/locale"
   fi
   # 再用 localedef 补一遍。不用 `[ -x ]` 判它跑不跑得起来：那个测试在宿主侧解析
   # 路径，若 /usr/bin/localedef 是绝对符号链接，宿主上目标存在而 chroot 内不存在，
@@ -177,7 +183,7 @@ build_slice() {
   else
     # 暂为告警而非致命：v20/amd64 上 localedef 无法 exec 而同版本 arm64 正常，
     # 差别在盘里而不在代码里。先把现场打全，运行时的判定交给 verify 的 locale_zh。
-    echo "::warning::[$DID/$TIER] 镜像里没有 zh_CN locale——下面是现场"
+    echo "  [$DID/$TIER] 没有 zh_CN locale，现场如下："
     for x in "$D/usr/bin/localedef" "$D/usr/sbin/locale-gen" "$D/usr/bin/locale"; do
       printf "    slice %s: " "${x#$D}"; ls -ld "$x" 2>&1 | tail -1
       [ -L "$x" ] && printf "      -> %s（目标在 slice 内%s）\n" "$(readlink "$x")" \
@@ -188,6 +194,7 @@ build_slice() {
     done
     printf "    源 /usr/lib/locale 内容: "; ls "$SRC_ROOTFS/usr/lib/locale" 2>&1 | head -5 | tr "\n" " "; echo
     printf "    slice 内 i18n/locales 有无 zh_CN: "; ls -ld "$D/usr/share/i18n/locales/zh_CN" 2>&1 | tail -1
+    die "[$DID/$TIER] 镜像里没有 zh_CN locale（现场见上）"
   fi
   slim_locales "$D"
   make_tarball "$D" "$OUT"

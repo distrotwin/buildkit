@@ -4,20 +4,35 @@
 import sys, os, re, shutil, subprocess
 import stat as stat_mod
 
-def parse_status(path):
-    pkgs = {}
-    cur = {}
-    key = None
+def parse_status(path, native=None):
+    """按包名索引 status。开了 multiarch 的系统上同名包会有多条，必须挑本机架构那条。
+
+    这里踩过一个静默的坑：原先直接 `pkgs[name] = cur`，后解析的覆盖先解析的。
+    统信 UOS V20 桌面开着 i386 multiarch，libc6 有 amd64 与 i386 两条，于是
+    `libc6` 变成了 i386 那条，切片搬进 i386 的 ld-2.28.so 而漏掉 x86_64 的。
+    症状离真因很远：镜像里 `exec /bin/bash: no such file or directory`——
+    看起来像 bash 没进去，实际是它的 ELF 解释器整个缺失。而 ldconfig 是
+    static-pie，唯独它还能跑，更容易把人往别处带。
+    """
+    pkgs, cur, key = {}, {}, None
+    def put(c):
+        n = c.get('Package')
+        if not n: return
+        old = pkgs.get(n)
+        if old is None: pkgs[n] = c; return
+        # 已有同名：本机架构或 all 优先，其余（外来架构）不覆盖
+        a_new, a_old = c.get('Architecture', ''), old.get('Architecture', '')
+        if a_old in (native, 'all'): return
+        if a_new in (native, 'all'): pkgs[n] = c
     for line in open(path, encoding='utf-8', errors='replace'):
         if line.strip() == '':
-            if cur.get('Package'): pkgs[cur['Package']] = cur
-            cur, key = {}, None; continue
+            put(cur); cur, key = {}, None; continue
         if line[0] in ' \t' and key:
             cur[key] += '\n' + line.rstrip(); continue
         if ':' in line:
             key, _, v = line.partition(':')
             cur[key] = v.strip()
-    if cur.get('Package'): pkgs[cur['Package']] = cur
+    put(cur)
     return pkgs
 
 def dep_alts(field):
@@ -110,7 +125,21 @@ def main():
     if not admin: sys.exit(f"找不到 dpkg status（试过 var/lib/dpkg, usr/lib/dpkg/var）")
     print(f"dpkg admindir: /{admin}")
     status = os.path.join(src, admin, 'status')
-    pkgs = parse_status(status)
+    # dpkg 把本机架构记在 admindir/arch 的第一行；multiarch 系统上同名包有多条
+    # status 记录，必须靠它挑出本机那条，否则会搬进外来架构的 glibc。
+    native = os.environ.get('ARCH', '')
+    af = os.path.join(src, admin, 'arch')
+    if os.path.exists(af):
+        first = open(af, encoding='utf-8', errors='replace').readline().strip()
+        if first: native = first
+    if not native:
+        sys.exit('!! 判不出本机架构（admindir 里没有 arch 文件，环境也没给 ARCH）')
+    print(f"本机架构: {native}")
+    pkgs = parse_status(status, native)
+    # 早失败：本机架构的 libc6 必须在，否则切出来的镜像连 bash 都 exec 不了，
+    # 而报错会是「no such file or directory」，指向 bash 而不是缺失的解释器。
+    if 'libc6' in pkgs and pkgs['libc6'].get('Architecture') not in (native, 'all'):
+        sys.exit(f"!! libc6 解析成了 {pkgs['libc6'].get('Architecture')} 而非 {native}")
     keep, missing = closure(pkgs, seeds)
     print(f"种子 {len(seeds)} 个 -> 闭包 {len(keep)} 个包" + (f"，未解析 {len(missing)}: {sorted(missing)[:8]}" if missing else ""))
     info = os.path.join(src, admin, 'info')
@@ -246,4 +275,6 @@ def main():
     sz = subprocess.run(['du','-sh',dst], capture_output=True, text=True).stdout.split()[0]
     print(f"完成: {dst}  {sz}")
 
-main()
+
+if __name__ == '__main__':
+    main()

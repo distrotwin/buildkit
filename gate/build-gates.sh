@@ -50,8 +50,8 @@ else
   echo "目标 $TGT 与宿主 $HOST_ARCH 不同，交叉编译：$CXX"
 fi
 
-docker run -d --name "$C" -e http_proxy= -e https_proxy= "$BUILDER_IMG" sleep 600 >/dev/null
-docker exec "$C" bash -c "apt-get update -qq && apt-get install -y -qq --no-install-recommends $PKG >/dev/null"
+docker run -d --name "$C" -e http_proxy= -e https_proxy= "$BUILDER_IMG" sleep 600
+docker exec "$C" bash -c "apt-get update && apt-get install -y --no-install-recommends $PKG"
 
 docker exec -i "$C" bash -c 'cat > /t.cpp' < "$ROOT/gate/t.cpp"   # -i 必须有，否则 stdin 不接、源文件是空的
 docker exec "$C" bash -c "$CXX -O2 -o /t_high /t.cpp"

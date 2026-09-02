@@ -38,11 +38,11 @@ jobs:
         env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
         run: |
           set -eu
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends \
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
             mmdebstrap debootstrap dpkg-dev gpgv xz-utils zstd file
           if [ "${{ inputs.needs-qemu }}" = true ]; then
-            sudo apt-get install -y -qq --no-install-recommends qemu-user-static binfmt-support
+            sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
             echo "qemu-user-static: $(dpkg-query -W -f='${Version}' qemu-user-static)"
             echo "已注册的 binfmt 条目："; ls /proc/sys/fs/binfmt_misc/ | sed 's/^/  /'
             # 前置断言：目标架构的 binfmt 必须真的在。不断言的话，缺失会在
@@ -64,12 +64,33 @@ jobs:
               exit 1
             fi
           fi
-          docker build -q --build-arg http_proxy= --build-arg https_proxy= \
+          docker build --progress=plain --build-arg http_proxy= --build-arg https_proxy= \
             -f buildkit/Dockerfile.builder -t dosbuild-cache:latest buildkit/
           docker run -d --name dosb --privileged --init -v "$ROOT:/w" \
             -e DEBIAN_FRONTEND=noninteractive -e http_proxy= -e https_proxy= \
             dosbuild-cache:latest sleep infinity
           docker exec dosb bash -c 'ls -d /w/distros /w/buildkit/lib'
+
+      # 把这一步的输入与环境原样打出来。出问题时最先要回答的是「当时是什么条件」，
+      # 而那些条件散落在 matrix、conf、宿主三处，事后翻日志拼不齐。
+      - name: 记录构建环境
+        env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
+        run: |
+          set -eu
+          echo "── 本 job 的输入 ──"
+          echo "  distro-id=${{ inputs.distro-id }}  arch=${{ inputs.arch }}  tier=${{ inputs.tier }}"
+          echo "  runner=${{ inputs.runner }}  needs-qemu=${{ inputs.needs-qemu }}"
+          echo "── conf 解出的值（按本 job 的 ARCH）──"
+          for k in METHOD MIRROR SUITE COMPONENTS IMAGE EXPECT_GLIBC EXPECT_LIBSTDCPP EXPECT_GLIBCXX XFAIL; do
+            printf '  %-18s %s\n' "$k" "$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' "$k")"
+          done
+          echo "── 宿主 ──"
+          echo "  uname=$(uname -m)  内核=$(uname -r)  发行版=$(. /etc/os-release; echo "$PRETTY_NAME")"
+          echo "  dpkg=$(dpkg --version | head -1)"
+          echo "  mmdebstrap=$(mmdebstrap --version 2>&1 | head -1)"
+          echo "  debootstrap=$(debootstrap --version 2>&1 | head -1)"
+          echo "  docker=$(docker --version)"
+          df -h / | tail -1 | sed 's/^/  磁盘 /'
 
       - name: 造本地源（仅需要的版本）
         env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }

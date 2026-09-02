@@ -32,7 +32,7 @@ jobs:
       - name: 装载各架构镜像
         run: |
           set -eu
-          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd
           found=0
           for d in imgs/*/; do
             [ -f "$d/image.tar.zst" ] || continue
@@ -66,7 +66,7 @@ jobs:
             docker image inspect "$SRC" >/dev/null 2>&1 || { echo "跳过 $a：镜像 $SRC 未装载"; continue; }
             for T in "$PFX-$TIER-$a" "$PFX-$TIER-$a-$STAMP"; do
               docker tag "$SRC" "$REG:$T"
-              docker push -q "$REG:$T"
+              docker push "$REG:$T"
               echo "  推送 $REG:$T"
             done
             pushed="$pushed $REG:$PFX-$TIER-$a"
@@ -87,16 +87,16 @@ jobs:
           # 在不同架构下的 ABI 并不一致——这不是错误，但必须在仓库说明里写清楚，
           # 否则用户会把 amd64 上验过的结论套到别的架构上。
           docker manifest create "$REG:$PFX-$TIER" $SRCS
-          docker manifest push -q "$REG:$PFX-$TIER"
+          docker manifest push "$REG:$PFX-$TIER"
           echo "  manifest $REG:$PFX-$TIER ←$SRCS"
           # 不带档位后缀的 tag 指向 devel，与 golang:1.21 是完整版的惯例一致
           if [ "$TIER" = devel ]; then
             docker manifest create "$REG:$PFX" $SRCS
-            docker manifest push -q "$REG:$PFX"
+            docker manifest push "$REG:$PFX"
             echo "  manifest $REG:$PFX"
           fi
           if [ "${{ inputs.latest }}" = true ]; then
             docker manifest create "$REG:latest" $SRCS
-            docker manifest push -q "$REG:latest"
+            docker manifest push "$REG:latest"
             echo "  manifest $REG:latest"
           fi

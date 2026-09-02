@@ -25,6 +25,16 @@ jobs:
       - uses: actions/checkout@v4
         with: { submodules: recursive }
 
+      - name: 记录测试环境
+        run: |
+          echo "── 本 job 的输入 ──"
+          echo "  distro-id=${{ inputs.distro-id }}  arch=${{ inputs.arch }}  tier=${{ inputs.tier }}"
+          echo "  runner=${{ inputs.runner }}  needs-qemu=${{ inputs.needs-qemu }}"
+          echo "── 宿主 ──"
+          echo "  uname=$(uname -m)  发行版=$(. /etc/os-release; echo "$PRETTY_NAME")"
+          echo "  docker=$(docker --version)"
+          df -h / | tail -1 | sed 's/^/  磁盘 /'
+
       - uses: actions/download-artifact@v4
         with:
           name: img-${{ inputs.distro-id }}-${{ inputs.arch }}-${{ inputs.tier }}
@@ -37,8 +47,8 @@ jobs:
         if: inputs.needs-qemu
         run: |
           set -eu
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-user-static binfmt-support
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
           echo "qemu-user-static: $(dpkg-query -W -f='${Version}' qemu-user-static)"
           case "${{ inputs.arch }}" in
             loong64|loongarch64) NEED=qemu-loongarch64 ;;
@@ -56,7 +66,7 @@ jobs:
       - name: 装载镜像
         run: |
           set -eu
-          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends zstd
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd
           zstd -d -c ship/image.tar.zst | docker load
           IMG=$(cat ship/image-ref.txt)
           docker image inspect "$IMG" >/dev/null || { echo "::error::装载后镜像 $IMG 不存在"; exit 1; }

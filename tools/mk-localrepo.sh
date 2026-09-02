@@ -46,7 +46,7 @@ PY
     find x -exec touch -h -d "@${SOURCE_DATE_EPOCH:-1700000000}" {} + 2>/dev/null || true
     # 架构取自包自己的 control（Architecture: all 的包不能被改名成某个具体架构）
     parch=$(awk '/^Architecture:/{print $2}' x/DEBIAN/control)
-    dpkg-deb --build --root-owner-group x "$REPO/${pkg}_${newver}_${parch}.deb" >/dev/null
+    dpkg-deb --build --root-owner-group x "$REPO/${pkg}_${newver}_${parch}.deb"
     log "重打包 $pkg -> $newver   原 [$old]"
     cd /; rm -rf "$tmp"
   done
@@ -88,7 +88,7 @@ CPY
   find "$tmp/s" -type d -exec chmod 755 {} + ; find "$tmp/s" -type f -exec chmod 644 {} +
   chmod 755 "$tmp/s/DEBIAN"
   find "$tmp/s" -exec touch -h -d "@${SOURCE_DATE_EPOCH:-1700000000}" {} + 2>/dev/null || true
-  dpkg-deb --build --root-owner-group "$tmp/s" "$REPO/container-stub_1.0_all.deb" >/dev/null
+  dpkg-deb --build --root-owner-group "$tmp/s" "$REPO/container-stub_1.0_all.deb"
   log "假包 container-stub  Provides: $STUB_PROVIDES"
   rm -rf "$tmp"
 fi

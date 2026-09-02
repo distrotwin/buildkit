@@ -28,7 +28,7 @@ OPTS=(-c 'CMD ["/bin/bash"]' -c 'ENV LANG=C.UTF-8'
 if tar tf "$TAR" 2>/dev/null | grep -qE '(usr/)?bin/systemctl$'; then
   OPTS+=(-c 'STOPSIGNAL SIGRTMIN+3')
 fi
-docker import "${OPTS[@]}" "$TAR" "$IMAGE:$TIER" >/dev/null
+docker import "${OPTS[@]}" "$TAR" "$IMAGE:$TIER"
 echo "  导入 $IMAGE:$TIER $(docker images "$IMAGE:$TIER" --format '{{.Size}}')"
 }
 

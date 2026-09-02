@@ -143,7 +143,7 @@ build_slice() {
   # 所以必然漏。UOS 的情形不致命 —— Debian 多架构目录在动态链接器内置默认路径里，
   # 缺 cache 只损性能；但补上更接近真机，且这一项现在有门禁盯着。
   if [ -x "$D/sbin/ldconfig" ]; then
-    chroot "$D" /sbin/ldconfig 2>/dev/null || true
+    chroot "$D" /sbin/ldconfig || true
     [ -s "$D/etc/ld.so.cache" ] && log "  ld.so.cache 生成 $(stat -c%s "$D/etc/ld.so.cache") 字节"
     # ldconfig 另外会写 /var/cache/ldconfig/aux-cache，它记录每个库的 inode 与
     # mtime 用于增量加速 —— 天然不可复现，实测让 uos25 三档连构两次哈希全漂。
@@ -152,8 +152,8 @@ build_slice() {
   fi
   # locale：宿主的 localedef 版本可能不同，用容器化方式在目标 rootfs 里生成
   if [ -d "$D/usr/share/i18n/locales" ] && [ -x "$D/usr/bin/localedef" ]; then
-    chroot "$D" /usr/bin/localedef -i zh_CN -c -f UTF-8 zh_CN.UTF-8 2>/dev/null || true
-    chroot "$D" /usr/bin/localedef -i en_US -c -f UTF-8 en_US.UTF-8 2>/dev/null || true
+    chroot "$D" /usr/bin/localedef -i zh_CN -c -f UTF-8 zh_CN.UTF-8 || true
+    chroot "$D" /usr/bin/localedef -i en_US -c -f UTF-8 en_US.UTF-8 || true
   fi
   slim_locales "$D"
   make_tarball "$D" "$OUT"

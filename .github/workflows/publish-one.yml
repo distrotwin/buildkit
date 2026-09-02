@@ -141,17 +141,16 @@ jobs:
             [ -n "$SRC" ] || { echo "跳过 $a：没有该架构的制品"; continue; }
             docker image inspect "$SRC" >/dev/null 2>&1 || { echo "跳过 $a：镜像 $SRC 未装载"; continue; }
 
-            # 实测 ABI 值取自测试阶段的结果 JSON
-            RJ="results/${{ inputs.distro-id }}-$a-$TIER.json"
-            if [ -f "$RJ" ]; then
-              MG=$(jq -r '.measured.glibc // ""' "$RJ")
-              ML=$(jq -r '.measured.libstdcpp // ""' "$RJ")
-              MX=$(jq -r '.measured.glibcxx // ""' "$RJ")
-              EPOCH=$(cat "out/${{ inputs.distro-id }}.epoch" 2>/dev/null || echo "")
-            else
-              echo "::warning::找不到 $RJ，实测 ABI 值将留空"
-              MG=""; ML=""; MX=""; EPOCH=""
-            fi
+            # 实测 ABI 值取自测试阶段的结果 JSON。路径用 find 定位而不是拼：
+            # 制品内部本身带一层 results/，配上 download-artifact 的
+            # merge-multiple 落地成 results/results/<file>.json，写死路径读不到，
+            # 于是三个 ABI label 一直是空字符串——警告当时就打在日志里了，没人读。
+            RJ=$(find results -type f -name "${{ inputs.distro-id }}-$a-$TIER.json" 2>/dev/null | head -1)
+            [ -n "$RJ" ] || { echo "::error::找不到 ${{ inputs.distro-id }}-$a-$TIER.json，实测 ABI 值无从取得"; exit 1; }
+            MG=$(jq -r '.measured.glibc // ""' "$RJ")
+            ML=$(jq -r '.measured.libstdcpp // ""' "$RJ")
+            MX=$(jq -r '.measured.glibcxx // ""' "$RJ")
+            EPOCH=$(cat "imgs/img-${{ inputs.distro-id }}-$a-$TIER/epoch.txt" 2>/dev/null || echo "")
             SUITE=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SUITE)
 
             # 溯源信息在这里打而不是 import 时，是因为 commit SHA 与 run URL 只有发布
@@ -193,6 +192,11 @@ jobs:
             if ! diff <(cfg "$SRC") <(cfg "$SRC-labeled"); then
               echo "::error::打 label 时改动了 Labels 以外的东西（上面是差异）"; exit 1
             fi
+            # 空值 label 比没有 label 更糟：它看起来像「量过了，值就是空」。
+            # 上一轮四个 label 全空发了出去，就是因为没人对着值看一眼。
+            EMPTY=$(docker image inspect "$SRC-labeled" \
+                    --format '{{range $k,$v := .Config.Labels}}{{if eq $v ""}}{{$k}} {{end}}{{end}}')
+            [ -z "$EMPTY" ] || { echo "::error::这些 label 的值是空的: $EMPTY"; exit 1; }
             echo "── $a 的溯源 label ──"
             docker inspect "$SRC-labeled" --format '{{json .Config.Labels}}' | tr ',' '\n' | sed 's/^/    /'
 

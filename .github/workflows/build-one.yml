@@ -156,6 +156,12 @@ jobs:
           mkdir -p ship
           docker save "$ARCHIMG" | zstd -3 -T0 -o ship/image.tar.zst
           echo "$ARCHIMG" > ship/image-ref.txt
+          # 源快照标记必须随制品走。它只存在于构建机的 out/，而发布 job 是全新
+          # checkout——此前 cn.internal.source-date-epoch 因此一直是空字符串，
+          # 而 README 把它当成「判断两个镜像是否同一份」的抓手在用。
+          E="out/${{ inputs.distro-id }}.epoch"
+          [ -s "$E" ] || { echo "::error::缺 $E，源快照无从记录"; exit 1; }
+          cp "$E" ship/epoch.txt
           ls -la ship/
 
       - uses: actions/upload-artifact@v4

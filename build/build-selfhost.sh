@@ -38,6 +38,17 @@ STAGE=$CROOT/work/$DID-stage
 mkdir -p "$ROOT_HOST/out" "$ROOT_HOST/work"
 log(){ printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
+# ── 源快照标记。mmdebstrap 那条路由 build.sh 落盘，selfhost 这条以前根本不算，
+#    于是 v4/v10sp1 的镜像连「建自源的哪个快照」都答不上来，发布阶段的
+#    cn.internal.source-date-epoch label 一直是空字符串。
+#    注意它在本路径上**只是快照标记，不是逐位复现的承诺**：产物出自
+#    docker export，字节流本就不可复现（见下方注释与 report.md §8）。
+#    子 shell 里 source，避免 common.sh 的 log/die 覆盖本脚本自己的定义。
+SOURCE_DATE_EPOCH=$( BK="$BK_HOST" ROOT="$ROOT_HOST"; . "$BK_HOST/lib/common.sh"; \
+                     derive_epoch "${MIRROR:-}" "${SUITE:-}" )
+printf '%s' "$SOURCE_DATE_EPOCH" > "$ROOT_HOST/out/$DID.epoch"
+log "[$DID] SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ($(date -u -d @"$SOURCE_DATE_EPOCH" 2>/dev/null))"
+
 # ── 阶段 0：独立验签（debootstrap 用 gpgv，能接受麒麟 key 的 SHA1 自签名）
 # 在线源必须验签；介质本地源没有签名（完整性由 ISO 的官方校验值兜，见各 conf 的
 # ISO_MD5/ISO_SHA256），所以按 conf 的 NO_CHECK_GPG 跳过这一步而不是无条件执行。

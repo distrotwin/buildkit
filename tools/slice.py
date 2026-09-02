@@ -115,6 +115,24 @@ def copy_filtered_db(src_f, dst_f, keep, pkg_line):
             fh.write(l + '\n')
 
 
+def mkparent(dst, t):
+    """建 t 的父目录，允许路径中途经过目录软链。
+
+    usr-merge 系统上 /lib64 是指向 usr/lib64 的软链，而 usr/lib64 此刻还不存在。
+    直接 os.makedirs(dirname, exist_ok=True) 会在这个悬空软链上抛 FileExistsError，
+    于是 /lib64/ld-linux-x86-64.so.2 被静默跳过——切出来的镜像里 ELF 解释器缺失，
+    报错却是 `exec /bin/bash: no such file or directory`，指向 bash 而不是解释器。
+
+    解析后必须确认仍在 dst 之内：软链若是绝对路径，realpath 会逃出 dst 写到宿主上。
+    """
+    d = os.path.dirname(t)
+    real = os.path.realpath(d)
+    root = os.path.realpath(dst)
+    if not (real == root or real.startswith(root + os.sep)):
+        raise ValueError(f'父目录 {d} 解析到 dst 之外：{real}')
+    os.makedirs(real, exist_ok=True)
+
+
 def main():
     src, dst, seedstr = sys.argv[1], sys.argv[2], sys.argv[3]
     seeds = [s.strip() for s in seedstr.split(',') if s.strip()]
@@ -167,7 +185,7 @@ def main():
             t = os.path.join(dst, f.lstrip('/'))
             if os.path.lexists(t): continue
             try:
-                os.makedirs(os.path.dirname(t), exist_ok=True)
+                mkparent(dst, t)
                 os.symlink(os.readlink(os.path.join(src, f.lstrip('/'))), t)
             except Exception:
                 left.append(f)
@@ -190,12 +208,16 @@ def main():
         if not left or len(left) == len(todo): todo = left; break
         todo = left
     if todo: print(f"  ! 有 {len(todo)} 个目录建不出来（示例 {todo[:3]}）")
-    n_copy = n_skip = 0
+    n_copy = n_skip = n_badparent = 0
     for f in sorted(files):
         s = os.path.join(src, f.lstrip('/')); t = os.path.join(dst, f.lstrip('/'))
         if not os.path.lexists(s): n_skip += 1; continue
-        try: os.makedirs(os.path.dirname(t), exist_ok=True)
-        except Exception: n_skip += 1; continue
+        try: mkparent(dst, t)
+        except Exception as ex:
+            # 建不出父目录不是「源里缺这个文件」，混在一起计数会让真问题看不见
+            n_badparent += 1
+            if n_badparent <= 5: print(f"    建父目录失败 {f}: {type(ex).__name__}: {ex}")
+            continue
         if os.path.islink(s):
             if os.path.lexists(t): n_copy += 1; continue
             try:
@@ -217,7 +239,10 @@ def main():
                 if n_skip <= 5: print(f"    跳过 {f}: {type(ex).__name__}: {ex}")
                 continue
         n_copy += 1
-    print(f"拷贝 {n_copy}，跳过缺失 {n_skip}")
+    print(f"拷贝 {n_copy}，源缺失 {n_skip}，建父目录失败 {n_badparent}")
+    if n_badparent:
+        sys.exit(f"!! 有 {n_badparent} 个文件因父目录建不出来而没进切片——"
+                 f"这类缺失会以「exec ...: no such file or directory」的形式在运行时才暴露")
     # 缺包 / 跳过过多都是静默劣化的温床，超阈值直接失败而不是只打印
     if missing - {'usrmerge'}:
         sys.exit(f"!! 依赖未解析（非预期）: {sorted(missing - {'usrmerge'})[:12]}")

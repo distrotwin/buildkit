@@ -50,8 +50,8 @@ jobs:
           #
           # 但要清楚它锁不住什么：镜像内容还取决于上游源的包。同一 commit 隔一周
           # 重建，若源更新过则产出字节不同，而 tag 相同——这是唯一的失真窗口。
-          # 抓手是构建时的 SOURCE_DATE_EPOCH 取自源 Release 的 Date 字段：
-          # 源没动则重建逐位一致，源动了则这个 label 会不同。所以两者都记进 label。
+          # 镜像里没有记录源快照的 label（那个值只存在于构建机上，发布 job 取不到），
+          # 所以要确认手里两个镜像是不是同一份，只能比 digest。
           STAMP=$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d "$GITHUB_SHA")
           echo "stamp=$STAMP" >> "$GITHUB_OUTPUT"
           echo "kylin_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
@@ -150,7 +150,6 @@ jobs:
             MG=$(jq -r '.measured.glibc // ""' "$RJ")
             ML=$(jq -r '.measured.libstdcpp // ""' "$RJ")
             MX=$(jq -r '.measured.glibcxx // ""' "$RJ")
-            EPOCH=$(cat "imgs/img-${{ inputs.distro-id }}-$a-$TIER/epoch.txt" 2>/dev/null || echo "")
             SUITE=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SUITE)
 
             # 溯源信息在这里打而不是 import 时，是因为 commit SHA 与 run URL 只有发布
@@ -175,7 +174,6 @@ jobs:
               -c "LABEL cn.internal.kylin-commit=$KSHA" \
               -c "LABEL cn.internal.buildkit-commit=$BSHA" \
               -c "LABEL cn.internal.suite=$SUITE" \
-              -c "LABEL cn.internal.source-date-epoch=$EPOCH" \
               -c "LABEL cn.internal.arch=$a" \
               -c "LABEL cn.internal.glibc=$MG" \
               -c "LABEL cn.internal.libstdcpp=$ML" \

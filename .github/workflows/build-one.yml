@@ -12,6 +12,12 @@ on:
       tier:      { type: string, required: true }
       runner:    { type: string, required: true }
       needs-qemu: { type: boolean, default: false }
+      # 单次尝试的上限与尝试次数。默认按原生构建给（实测最慢的档约 45 分钟），
+      # 模拟构建要显著放宽：loong64 的 micro 档在 QEMU 下就要 322 秒，devel 带
+      # build-essential 重得多。两者相乘还必须留在 GitHub 单 job 的 6 小时上限内，
+      # 所以放宽超时的同时要减少尝试次数。
+      timeout-minutes: { type: number, default: 60 }
+      max-attempts:    { type: number, default: 3 }
 
 permissions:
   contents: read
@@ -117,8 +123,8 @@ jobs:
           ARCH: ${{ inputs.arch }}
           ROOT: ${{ github.workspace }}
         with:
-          timeout_minutes: 60
-          max_attempts: 3
+          timeout_minutes: ${{ inputs.timeout-minutes }}
+          max_attempts: ${{ inputs.max-attempts }}
           retry_wait_seconds: 30
           shell: bash
           command: |

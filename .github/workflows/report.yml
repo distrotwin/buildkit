@@ -11,7 +11,7 @@ on:
       distros:
         type: string
         required: true
-        description: "空格分隔的系统列表，用于按系统切分 artifact"
+        description: "JSON 数组形式的系统列表，如 [\"v4\",\"v11\"]。下面的 bundle 作业直接把它展开成矩阵"
       expected:
         type: number
         default: 0
@@ -54,7 +54,7 @@ jobs:
             --baseline '${{ inputs.baseline }}' || rc=$?
           cat reports/summary.md >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          for d in ${{ inputs.distros }}; do
+          for d in $(printf '%s' '${{ inputs.distros }}' | jq -r '.[]'); do
             [ -f "reports/report-$d.md" ] || continue
             {
               echo "<details><summary>$d 详细报告</summary>"; echo
@@ -63,18 +63,6 @@ jobs:
           done
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
-      - name: 按系统打包报告与日志
-        run: |
-          set -eu
-          for d in ${{ inputs.distros }}; do
-            mkdir -p "bundle/$d"
-            [ -f "reports/report-$d.md" ] && cp "reports/report-$d.md" "bundle/$d/"
-            # 日志文件名形如 <did>-<arch>-<tier>.{verify,smoke}.log，按系统前缀归拢
-            find incoming -name "$d-*.log" -exec cp {} "bundle/$d/" \; 2>/dev/null || true
-            find incoming -name "$d-*.json" -exec cp {} "bundle/$d/" \; 2>/dev/null || true
-            echo "$d: $(ls -1 "bundle/$d" | wc -l) 个文件"
-          done
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -82,30 +70,50 @@ jobs:
           path: reports/
           retention-days: 30
 
-      # 按系统分开的包：出问题时只下自己关心的那个，不必拖走全部
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: report-v4
-          path: bundle/v4/
-          retention-days: 30
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: report-v10sp1
-          path: bundle/v10sp1/
-          retention-days: 30
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: report-v11
-          path: bundle/v11/
-          retention-days: 30
-          if-no-files-found: ignore
-
       - name: 按渲染结果定成败
         run: |
           [ "${{ steps.render.outputs.rc }}" = "0" ] \
             || { echo "::error::报告显示有异常或汇总守卫未过，详见上方 summary 与 artifact"; exit 1; }
+
+  # 按系统分开的包：出问题时只下自己关心的那个，不必拖走全部。
+  # 用矩阵展开而不是写死几个 upload 步骤——写死等于让这份可复用 workflow
+  # 记住某一个下游仓库的版本名，别的 OS 接进来会拿到一堆空 artifact。
+  bundle:
+    needs: [report]
+    if: always()
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        did: ${{ fromJSON(inputs.distros) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: incoming
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with: { name: report-summary, path: reports }
+
+      - name: 归拢 ${{ matrix.did }} 的报告与日志
+        run: |
+          set -eu
+          D='${{ matrix.did }}'
+          mkdir -p "bundle/$D"
+          [ -f "reports/report-$D.md" ] && cp "reports/report-$D.md" "bundle/$D/"
+          # 按 did 归拢必须精确取第一个 - 之前的字段，不能用 "$D-*" 通配：
+          # v10 是 v10sp1 的前缀，通配会把 v10sp1 的日志一并收进 v10 的包。
+          find incoming -type f \( -name '*.log' -o -name '*.json' \) | while read -r f; do
+            b=$(basename "$f")
+            [ "${b%%-*}" = "$D" ] && cp "$f" "bundle/$D/"
+          done
+          echo "$D: $(ls -1 "bundle/$D" | wc -l) 个文件"
+          ls -1 "bundle/$D" | sed 's/^/  /'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ matrix.did }}
+          path: bundle/${{ matrix.did }}/
+          retention-days: 30
+          if-no-files-found: ignore

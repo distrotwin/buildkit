@@ -116,6 +116,12 @@ b=$(basename "$f"); [ "${b%%-*}" = "$D" ]
 
 **`EXPECT_*` 宁可填推导值也不要留空。** 留空会因「期望空 == 实际空」被判通过，等于这一项验收不存在。填错会让门禁当场报错，那是好事。
 
+**开了 multiarch 的系统，切片要挑对架构。** 国产桌面 OS 常带 i386 兼容层，`status` 里同名包有多条记录。按裸包名索引会让后解析的覆盖先解析的，于是 `libc6` 可能变成 `libc6:i386`，切片搬进 i386 的 `ld-2.28.so` 而漏掉 64 位的整套 glibc。症状离真因隔三步：镜像报 `exec /bin/bash: no such file or directory`，看着像 bash 没进去，实际是它的 ELF 解释器缺失；而 `ldconfig` 是 static-pie，唯独它还能跑，更容易把人带偏。`slice.py` 现在按 admindir 的 `arch` 首行挑本机架构，并对 `libc6` 做早失败断言。
+
+**同一版本不同架构的表现差异是突破口，不是噪声。** 上面那个缺陷只在 amd64 出现，arm64 正常——因为 arm64 的解释器在 `/lib/ld-linux-aarch64.so.1`，而 `lib -> usr/lib` 那个软链在。定位时先问「另一个架构为什么没事」，往往比继续读同一份日志快。
+
+**读日志读不出来时，把制品下下来直接看。** 构建产物就在 artifact 里，几十上百 MB，`docker load` 之后 `tar -tvf` 一览无余。上面那个缺陷我照日志猜了三轮（qemu、悬空符号链接、源里没有归档）全错，下载制品几分钟就有了确定答案。
+
 **切片种子必须对着盘内清单逐个核，不能照抄另一个版本。** UOS V20 的种子照抄了 V25，而 Debian 10 那一代的装机清单里没有 `zstd`，直到切 base 档时才报「依赖未解析」。ISO 里就带着完整的装机清单（V20 是 `live/filesystem.manifest`，V25 是 `live/filesystem.packages`），用 `tools/iso9660.py` 直读几十 KB 就能核完，成本远低于跑一小时抽盘再失败：
 
 ```python

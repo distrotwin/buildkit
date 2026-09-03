@@ -139,7 +139,10 @@ for DID in $DISTROS; do
   for TIER in ${TIERS:-micro base devel}; do
     IMG="$IMAGE:$TIER"
     docker image inspect "$IMG" >/dev/null 2>&1 || { echo "  ✗ $IMG 不存在"; FAIL=$((FAIL+1)); continue; }
+    # 把包管理往返的上限传进去（默认值在 inner-checks.sh 里）：源的地理位置不同，
+    # 合理耗时差一个数量级，允许调用方覆盖而不是把网络距离算作缺陷。
     out=$(docker run --rm -e http_proxy= -e https_proxy= -e HTTP_PROXY= -e HTTPS_PROXY= \
+            -e PKG_RT_TIMEOUT="${PKG_RT_TIMEOUT:-}" -e PKG_RT_TIMEOUT_RM="${PKG_RT_TIMEOUT_RM:-}" \
             -v "$BK/test/inner-checks.sh:/checks.sh:ro" "$IMG" /bin/bash /checks.sh 2>/dev/null)
     g(){ printf '%s' "$out" | awk -F= -v k="$1" '$1==k{print $2; exit}'; }
     # 记下实测的 ABI 值，供发布阶段写进镜像 label——那样 docker inspect 就能筛 ABI，

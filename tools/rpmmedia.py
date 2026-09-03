@@ -92,7 +92,21 @@ def main():
     seeds = [s.strip() for s in seedstr.split(",") if s.strip()]
     pkgs, provides = load_primary(os.path.join(media, "repodata"))
     print(f"介质仓库 {len(pkgs)} 个包，{len(provides)} 个能力")
-    keep, unresolved = closure(pkgs, provides, seeds)
+    # 取材阶段若交来了闭包清单，直接用它，不自己重算。理由见 rpmrepo-fetch.py：
+    # 两套闭包实现对「多提供者时挑哪个」的取舍不同，重算会与取材的结论分叉，
+    # 实测 loong64 的 base 档取材算 169 个而这里重算 166 个。ISO 介质那条路径
+    # 没有这个文件，仍走自己算。
+    _cl = os.path.join(media, ".closure")
+    if os.path.exists(_cl):
+        keep = {x.strip() for x in open(_cl) if x.strip()}
+        _absent = sorted(n for n in keep if n not in pkgs)
+        if _absent:
+            sys.exit("取材清单里有 %d 个包不在这份 primary 里：%s"
+                     % (len(_absent), ", ".join(_absent[:8])))
+        unresolved = set()
+        print("  用取材交来的闭包清单：%d 个包" % len(keep))
+    else:
+        keep, unresolved = closure(pkgs, provides, seeds)
     print(f"种子 {len(seeds)} 个 -> 闭包 {len(keep)} 个包")
     # 取材阶段若留下 .closure-count，就核对两侧算出的闭包一致。差异意味着这份
     # primary 不足以自描述（例如路径型依赖的提供者没有登记进 provides），

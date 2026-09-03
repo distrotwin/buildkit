@@ -378,6 +378,11 @@ def main():
     # 而那种情况下下游会"成功地"少装几个包。
     with open(os.path.join(dst, ".closure-count"), "w") as f:
         f.write("%d\n" % len(sel))
+    # 除了条数，把闭包**清单**也交出去。下游据此直接安装，不再自己重算 ——
+    # 两套闭包实现在「一个能力有多个提供者时挑哪个」上会分叉，追平它们是治标；
+    # 让取材算一次、装包直接用，这一类分叉就不存在了。
+    with open(os.path.join(dst, ".closure"), "w") as f:
+        f.write("\n".join(sorted(r["name"] for r in sel)) + "\n")
     with open(os.path.join(dst, ".epoch"), "w") as f:
         f.write("%d\n" % epoch)
     print("  SOURCE_DATE_EPOCH 锚点 = %d（各源 revision 取最大）" % epoch)

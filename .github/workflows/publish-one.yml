@@ -162,8 +162,15 @@ jobs:
             IURL=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' ISO_URL)
             if [ -n "$IURL" ]; then PROV+=(-c "LABEL cn.internal.iso-url=$IURL"); fi
             SQSHA=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SQUASHFS_SHA256)
+            # rpm 源那条路径（METHOD=rpmrepo）既没有 suite 也没有 ISO，它的溯源锚点是
+            # 源地址本身加公钥指纹。不登记的话这道门禁会把整批发布拦下来 —— 实测第一次
+            # 发布麒麟信安时六个 publish job 全部因此失败。
+            RB=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' REPO_BASES)
+            if [ -n "$RB" ]; then PROV+=(-c "LABEL cn.internal.repo-bases=$RB"); fi
+            KFP=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' RPM_KEY_FP)
+            if [ -n "$KFP" ]; then PROV+=(-c "LABEL cn.internal.rpm-key-fp=$KFP"); fi
             if [ -n "$SQSHA" ]; then PROV+=(-c "LABEL cn.internal.squashfs-sha256=$SQSHA"); fi
-            [ ${#PROV[@]} -gt 0 ] || { echo "::error::既无 suite 也无 ISO，记不下溯源锚点"; exit 1; }
+            [ ${#PROV[@]} -gt 0 ] || { echo "::error::conf 里既无 suite、也无 ISO、也无 REPO_BASES，记不下溯源锚点"; exit 1; }
 
             # 溯源信息在这里打而不是 import 时，是因为 commit SHA 与 run URL 只有发布
             # 阶段才知道，而两条构建路径的 import 分处两个脚本——写在那儿会变成

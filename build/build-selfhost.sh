@@ -154,6 +154,7 @@ for TIER in $TIERS; do
     -e TIER="$TIER" -e PKGS="$PKGS" -e SUITE="$SUITE" -e MIRROR="$MIRROR" \
     -e COMPONENTS="$COMPONENTS" -e PIN_NEVER="${PIN_NEVER:-}" \
     -e NO_CHECK_GPG="${NO_CHECK_GPG:-no}" \
+    -e EXTRA_SUITES="${EXTRA_SUITES:-}" \
     -v "$BK_HOST/build/selfhost-inner.sh:/inner.sh:ro" \
     -v "$ROOT_HOST/keys:/keys:ro" \
     -v "$BK_HOST/lib:/dosbuild-lib:ro" \
@@ -162,6 +163,17 @@ for TIER in $TIERS; do
     ${MEDIA_MOUNT} \
     -e DID="$DID" \
     "$IMAGE:_stage" sleep infinity >/dev/null
+  # conf 声明了更新源，就必须确认它真的进了容器的环境。这条断言故意放在 inner.sh
+  # 之外：inner 里的检查都套在 `if [ -n "$EXTRA_SUITES" ]` 内，变量没传进去时整块
+  # 连断言一起被跳过，构建照样绿——实测就这么发出去过一版没有更新源的镜像。
+  if [ -n "${EXTRA_SUITES:-}" ]; then
+    _env=$(docker inspect "$C" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^EXTRA_SUITES=//p')
+    [ "$_env" = "${EXTRA_SUITES}" ] || {
+      log "致命: conf 的 EXTRA_SUITES='${EXTRA_SUITES}' 没有正确传进容器（容器里是 '$_env'）"
+      log "      docker run 的 -e 白名单漏了这个变量，inner.sh 会静默跳过整个更新源逻辑"
+      docker rm -f "$C" >/dev/null 2>&1 || true; exit 1; }
+  fi
+
   if docker exec "$C" /bin/bash /inner.sh; then
     IMPORT_OPTS=(-c 'CMD ["/bin/bash"]' -c 'ENV LANG=C.UTF-8'
       -c "LABEL org.opencontainers.image.title=\"$DISPLAY_NAME\""
@@ -176,6 +188,20 @@ for TIER in $TIERS; do
     # 先落 tarball 再导入：产物可审计、可与其它两条路径统一做 tarball 层检查
     # （注意：docker export 的字节流不可逐位复现，见 report.md §8（可复现性））
     docker export "$C" > "$ROOT_HOST/out/$DID-$TIER.tar"
+    # 第三道，判据挂在产物上：出厂 sources.list 只要非空，就必须提到每个更新源。
+    # micro 档不带源（SRCLIST 为空），那是设计，所以只在非空时核。
+    if [ -n "${EXTRA_SUITES:-}" ]; then
+      _sl=$(tar xOf "$ROOT_HOST/out/$DID-$TIER.tar" ./etc/apt/sources.list 2>/dev/null || true)
+      if [ -n "$_sl" ]; then
+        for _es in $EXTRA_SUITES; do
+          printf '%s\n' "$_sl" | grep -q " $_es " || {
+            log "致命: 出厂 sources.list 里没有更新源 $_es，实际内容："
+            printf '%s\n' "$_sl" | sed 's/^/        /'
+            exit 1; }
+        done
+        log "  出厂 sources.list 已含更新源: $EXTRA_SUITES"
+      fi
+    fi
     # systemd 探测必须查**导出的 tar**，不能 docker exec：阶段 3 跑完之后这个容器
     # 就再也 exec 不进去了（报 cap_last_cap，见 report.md §9.1（局限）），用 exec 探测会让
     # STOPSIGNAL 静默漏设 —— 我就这么把它漏设过一次。

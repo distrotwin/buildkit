@@ -124,6 +124,7 @@ for DID in $DISTROS; do
         MICRO_INCLUDE BASE_INCLUDE DEVEL_INCLUDE STAGE_INCLUDE SLICE_MICRO \
         SLICE_BASE_EXTRA SLICE_DEVEL_EXTRA SOURCE_DATE_EPOCH MIRROR SUITE COMPONENTS \
         EXPECT_GLIBC EXPECT_LIBSTDCPP EXPECT_GLIBCXX IMAGE METHOD USRMERGE DISPLAY_NAME \
+        EXPECT_CXX EXPECT_OS_REPO \
         SRC_ROOTFS ISO_URL ISO_SQUASHFS_PATH SQUASHFS_SHA256 DEBOOTSTRAP_SCRIPT \
         FAMILY EXPECT_SHADOW NO_CHECK_GPG RPM_DB_BACKEND MEDIA_DIR
   . "$ROOT/distros/$DID.conf"
@@ -282,7 +283,10 @@ for DID in $DISTROS; do
                  *)  fail "apt_roundtrip: 无源时期望 N*，实际 $(g apt_roundtrip)" ;;
                esac
                check audit_after 0 "$(g audit_after)"
-             elif [ "${IMMUTABLE:-no}" = yes ]; then
+             elif [ "${EXPECT_OS_REPO:-yes}" = no ]; then
+               # 按 conf 声明的期望判，不拿 IMMUTABLE 当代名词：「是不是不可变系统」
+               # 与「有没有可用于装 OS 包的源」是两件事。统信 V20 不是不可变系统，
+               # 但它出厂的有效源只有应用商店与打印驱动，同样装不上 OS 包。
                # UOS V25 的 OS 分发走 OSTree + 玲珑，apt 源里只有应用商店的 GUI 应用
                # （实测源只提供 2496 个包，不含 nano 这类 OS 包）。所以：
                #   · apt update 必须成功（两个需授权的 401 源已默认注释掉，见 lib/common.sh）
@@ -315,8 +319,8 @@ for DID in $DISTROS; do
              { [ "${IMMUTABLE:-no}" = yes ] || [ "$(g has_source)" = N ]; } || check apt_check OK "$(g apt_check)"
              check has_cc Y "$(g has_cc)"; check has_make Y "$(g has_make)"
              check compile_c Y "$(g compile_c)"
-             if [ "${IMMUTABLE:-no}" = yes ]; then
-               check has_cxx N "$(g has_cxx)" warn   # UOS 桌面自身无 g++，已在 conf 注明
+             if [ "${EXPECT_CXX:-yes}" = no ]; then
+               check has_cxx N "$(g has_cxx)" warn   # 装机清单里就没有 g++，已在 conf 注明
              else
                check has_cxx Y "$(g has_cxx)"; check compile_cxx Y "$(g compile_cxx)"
              fi ;;

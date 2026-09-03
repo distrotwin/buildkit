@@ -196,6 +196,19 @@ build_slice() {
     printf "    slice 内 i18n/locales 有无 zh_CN: "; ls -ld "$D/usr/share/i18n/locales/zh_CN" 2>&1 | tail -1
     die "[$DID/$TIER] 镜像里没有 zh_CN locale（现场见上）"
   fi
+  # CA 信任库：/etc/ca-certificates.conf 是 conffile，不在包的文件清单里，切片搬不到，
+  # 于是 update-ca-certificates 没有可激活的清单，哈希软链残缺。统信 V20 实测只剩 71 个
+  # 软链而证书有 137 份，curl 报「unable to get local issuer certificate」，而显式
+  # --cacert 指 bundle 就通——说明 bundle 没问题，是 CApath 覆盖不全。V25 侥幸靠
+  # openssl 自带的 /usr/lib/ssl/cert.pem 找到 bundle，V20 的 openssl 不带那个软链。
+  # 按实际搬进来的证书重建清单再刷新，产物与镜像自洽。
+  if [ -d "$D/usr/share/ca-certificates" ] && [ -x "$D/usr/sbin/update-ca-certificates" ]; then
+    ( cd "$D/usr/share/ca-certificates" && find . -name "*.crt" | sed "s|^\./||" | sort ) \
+      > "$D/etc/ca-certificates.conf"
+    chroot "$D" /usr/sbin/update-ca-certificates --fresh >/dev/null 2>&1 \
+      || log "  update-ca-certificates 没跑成（跨架构时需 binfmt）"
+    log "  CA 信任库重建：$(find "$D/etc/ssl/certs" -name "*.0" -type l 2>/dev/null | wc -l) 个哈希软链"
+  fi
   slim_locales "$D"
   make_tarball "$D" "$OUT"
 }

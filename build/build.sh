@@ -269,6 +269,60 @@ build_debmedia() {
 # ── rpmmedia：rpm 系介质，解析 repodata 求闭包后用 rpm --root 装 ───────────
 # 麒麟信安的 ISO 实测无 squashfs（只有 Packages/ 2935 个 rpm + repodata/），
 # 所以既不能切片，也没有在线源可用（桌面版源需授权）。走 tools/rpmmedia.py。
+build_rpmrepo() {
+  local TIER=$1 seeds
+  case $TIER in
+    micro) seeds="$SLICE_MICRO" ;;
+    base)  seeds="$SLICE_MICRO,$SLICE_BASE_EXTRA" ;;
+    devel) seeds="$SLICE_MICRO,$SLICE_BASE_EXTRA,$SLICE_DEVEL_EXTRA" ;;
+    *) die "未知档位 $TIER" ;;
+  esac
+  [ -n "${REPO_BASES:-}" ] || die "conf 没给 REPO_BASES"
+  [ -n "${RPM_KEY:-}" ]    || die "conf 没给 RPM_KEY"
+  [ -n "${RPM_KEY_FP:-}" ] || die "conf 没给 RPM_KEY_FP（不钉指纹的话任何一把 key 都能'验过'）"
+  local KEY="$ROOT/${RPM_KEY#/}"
+  [ -f "$KEY" ] || die "公钥不存在: $KEY"
+
+  # 取材：把远程源物化成「介质形状」的目录。这一层之后的安装逻辑与 rpmmedia
+  # 完全共用 —— 两条路径的差别只在取材，不在装法。
+  local MEDIA="$ROOT/work/$DID-$TIER-src"
+  rm -rf "$MEDIA"; mkdir -p "$MEDIA"
+  log "[$DID/$TIER] rpmrepo 取材：$REPO_BASES"
+  KEYFILE="$KEY" KEY_FP="$RPM_KEY_FP" \
+    python3 "$BK/tools/rpmrepo-fetch.py" "$MEDIA" "$seeds" $REPO_BASES \
+    || die "[$DID/$TIER] 取材失败"
+
+  # 时间锚点取源的 revision（取材时写进 .epoch）。这里必须显式设上：
+  # make_tarball 的兜底值是硬编码常量 1700000000，那是个假锚点 —— 看着有值，
+  # 但和产物毫无关系，可复现性会静默失效。
+  if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH=$(cat "$MEDIA/.epoch" 2>/dev/null || echo "")
+    export SOURCE_DATE_EPOCH
+  fi
+  case "${SOURCE_DATE_EPOCH:-}" in
+    ''|*[!0-9]*) die "SOURCE_DATE_EPOCH 取不到或不是数字: '${SOURCE_DATE_EPOCH:-}'" ;;
+  esac
+  [ "$SOURCE_DATE_EPOCH" -gt 1600000000 ] \
+    || die "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH 早于 2020，不像真锚点"
+  log "[$DID/$TIER] SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH（源 revision）"
+
+  local D="$ROOT/work/$DID-$TIER"
+  rm -rf "$D"; mkdir -p "$D"
+  log "[$DID/$TIER] 装包（复用 rpmmedia 的装法与断言）"
+  RPM_DB_BACKEND="${RPM_DB_BACKEND:-}" \
+    python3 "$BK/tools/rpmmedia.py" "$MEDIA" "$D" "$seeds" || die "[$DID/$TIER] 装包失败"
+  adapt_container "$D" "" "$DID"
+  # 出厂源。deb 侧 micro 档不带源，rpm 侧对齐：micro 的种子里没有 dnf，
+  # 留个 repo 文件反而让 has_source 与 has_pkgmgr 自相矛盾。
+  if [ "$TIER" = micro ]; then
+    rm -rf "$D/etc/yum.repos.d"
+  else
+    write_yum_repos "$D" "$KEY" "$DID" "$REPO_BASES"
+  fi
+  slim_locales "$D"
+  make_tarball "$D" "$ROOT/out/$DID-$TIER.tar"
+}
+
 build_rpmmedia() {
   local TIER=$1 seeds
   case $TIER in
@@ -293,7 +347,7 @@ build_rpmmedia() {
 }
 
 case $METHOD in
-  mmdebstrap|slice|selfhost|debmedia|rpmmedia) ;;
+  mmdebstrap|slice|selfhost|debmedia|rpmmedia|rpmrepo) ;;
   *) die "未知 METHOD=$METHOD" ;;
 esac
 [ "$METHOD" = mmdebstrap ] && verify_repo_signature "${MIRROR%/}" "$SUITE"
@@ -314,6 +368,7 @@ else
       slice)      build_slice "$T" ;;
       debmedia)   build_debmedia "$T" ;;
       rpmmedia)   build_rpmmedia "$T" ;;
+      rpmrepo)    build_rpmrepo "$T" ;;
     esac
   done
 fi

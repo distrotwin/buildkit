@@ -373,3 +373,40 @@ PY2
     fi
   done
 }
+
+# ── rpm 系的出厂源 ─────────────────────────────────────────────────────────────
+# deb 侧写 /etc/apt/sources.list，rpm 侧的对应物是 /etc/yum.repos.d/*.repo 加一把
+# 落在 /etc/pki/rpm-gpg/ 的公钥。两件都要：只写 repo 文件而不放公钥，dnf 会在第一次
+# 装包时停下来问「是否导入 GPG key」，非交互环境下表现为装不上——而 has_source 那一项
+# 照样是 Y，于是「有源」与「能装」对不上。
+#
+# gpgcheck 一律开。关掉它能让 pkg_roundtrip 更容易过，但那是把判据往下调去迁就实现：
+# 镜像里的源要么可信要么不该写。
+write_yum_repos() {
+  local R=$1 KEY=$2 DID=$3 BASES=$4
+  local keyname; keyname=$(basename "$KEY")
+  mkdir -p "$R/etc/yum.repos.d" "$R/etc/pki/rpm-gpg"
+  cp "$KEY" "$R/etc/pki/rpm-gpg/$keyname" || die "公钥拷不进镜像"
+  : > "$R/etc/yum.repos.d/$DID.repo"
+  local i=0 b
+  for b in $BASES; do
+    i=$((i+1))
+    # 段名取源路径的后两段（如 6/os/x86_64 -> os-x86_64），比 repo1/repo2 可读，
+    # 而且用户 dnf --disablerepo 时能对上号。
+    local tag; tag=$(printf '%s' "$b" | awk -F/ '{print $(NF-1) "-" $NF}')
+    cat >> "$R/etc/yum.repos.d/$DID.repo" <<EOF
+[$DID-$tag]
+name=$DISPLAY_NAME - $tag
+baseurl=$b
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/$keyname
+EOF
+    printf '\n' >> "$R/etc/yum.repos.d/$DID.repo"
+  done
+  [ "$i" -gt 0 ] || die "REPO_BASES 是空的，写不出出厂源"
+  # 判据挂在结果上：文件真的非空、真的含 baseurl、公钥真的在。
+  grep -q '^baseurl=' "$R/etc/yum.repos.d/$DID.repo" || die "出厂 repo 文件里没有 baseurl"
+  [ -s "$R/etc/pki/rpm-gpg/$keyname" ] || die "镜像里的公钥是空文件"
+  log "  出厂源已写：$i 个 repo 段，公钥 /etc/pki/rpm-gpg/$keyname"
+}

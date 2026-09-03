@@ -100,6 +100,26 @@ dpkg --configure -a >/dev/null 2>&1 || true
 # 配了更新源就先把 debootstrap 阶段装的基础包升上去。档位包由下面逐包安装时
 # 自然取到最新版，但 libc6 / base-files / dpkg 来自阶段一，不升就停在发布树版本。
 if [ -n "${EXTRA_SUITES:-}" ]; then
+  # 容器里没有 systemd PID 1，postinst 里直调 systemctl 的包必然配置失败：
+  #   System has not been booted with systemd as init system (PID 1). Can't operate.
+  # 麒麟 V10 SP1 的 kyseclog-daemon 就是这样。档位包装不出这个问题——它们都不带
+  # systemd unit，只有全量升级才会碰到这类包。
+  #
+  # 两手都要，因为拦的是两条不同的路径：policy-rc.d 按 Debian 约定返回 101，只挡
+  # invoke-rc.d 与 deb-systemd-invoke；直调 systemctl 绕过它，得靠改道。
+  printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod 755 /usr/sbin/policy-rc.d
+  # systemctl 不存在也要挡：postinst 调不到它会以"命令找不到"失败，症状不同、
+  # 后果一样。所以两种情况都铺一个临时的 /bin/true。
+  _sctl=$(command -v systemctl 2>/dev/null || true)
+  _div=""; _stub=""
+  if [ -n "$_sctl" ]; then
+    dpkg-divert --local --rename --add "$_sctl" >/dev/null 2>&1 && _div=$_sctl
+    ln -sf /bin/true "$_sctl"
+  else
+    _stub=/usr/bin/systemctl
+    ln -sf /bin/true "$_stub"
+  fi
+
   _before=$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum | cut -c1-12)
   # 退出码不能被管道丢掉（同下面第 ③ 步的理由）。conffile 一律留旧的：厂商包里
   # 有交互式 conffile，不指定就会挂在提示上直到 job 超时。
@@ -111,6 +131,26 @@ if [ -n "${EXTRA_SUITES:-}" ]; then
   set -e
   grep -iE '^E:|segmentation|dpkg: error' /tmp/upgrade.log | head -5 || true
   _after=$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum | cut -c1-12)
+
+  # 改道必须撤干净再往下走，否则出厂镜像会带一个指向 /bin/true 的 systemctl，
+  # 而那种缺陷在镜像里毫无症状——用户直到要管服务时才发现。判据挂在结果上：
+  # 撤完之后 systemctl 必须是真文件，且 divert 表里不能再有它。
+  rm -f /usr/sbin/policy-rc.d
+  [ -z "$_stub" ] || rm -f "$_stub"
+  if [ -n "$_div" ]; then
+    rm -f "$_div"
+    dpkg-divert --local --rename --remove "$_div" >/dev/null 2>&1 || true
+    # 判据不写成"必须是真文件"——有的系统里 systemctl 本身就是软链，那样会误杀。
+    # 真正要拦的是"它还指着 /bin/true"，以及 divert 表里还留着我们那条。
+    [ -e "$_div" ] || { say "  ✗ systemctl 改道没撤回：$_div 不存在了"; exit 1; }
+    if [ "$(readlink -f "$_div")" = "$(readlink -f /bin/true)" ]; then
+      say "  ✗ systemctl 仍指向 /bin/true，改道没撤回"; exit 1
+    fi
+    if dpkg-divert --list 2>/dev/null | grep -q -- "$_div"; then
+      say "  ✗ divert 表里仍有 $_div"; exit 1
+    fi
+  fi
+
   # 两种都要拦死。配了更新源却一个包没动，说明源没生效——那镜像会静默地
   # 继续发陈旧的 ca-certificates，而这正是加这个配置要修的东西。
   if [ "$_rc" != 0 ]; then
@@ -124,7 +164,7 @@ if [ -n "${EXTRA_SUITES:-}" ]; then
     exit 1
   fi
   say "  基础包已按更新源升级（${EXTRA_SUITES}）"
-  dpkg-query -W -f='${Package} ${Version}\n' | grep -E '^(libc6|ca-certificates|openssl|base-files) ' | sed 's/^/      /' || true
+  dpkg-query -W -f='${Package} ${Version}\n' | grep -E '^(libc6|ca-certificates|openssl|base-files|tzdata) ' | sed 's/^/      /' || true
 fi
 
 # ③ 装档位包（逐包，规避大事务里的厂商 dpkg 缺陷）

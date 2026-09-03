@@ -386,6 +386,27 @@ write_yum_repos() {
   local R=$1 KEY=$2 DID=$3 BASES=$4
   local keyname; keyname=$(basename "$KEY")
   mkdir -p "$R/etc/yum.repos.d" "$R/etc/pki/rpm-gpg"
+  # 厂商自带的 repo 必须先停掉，只留我们验证过的那份。
+  #
+  # kylinsec-release 装出来的 /etc/yum.repos.d/kylinsec.repo 里，everything / EPOL /
+  # extra / update 四个段是 enabled=1，全部指向一个 mirrorlist 服务
+  # （?osversion=$osversion&repo=X&arch=$basearch）。那个服务**并不覆盖所有
+  # 版本×架构组合**：实测 osversion=6 & repo=update & arch=loongarch64 返回 0 个 URL，
+  # 于是 dnf 在这个 repo 上直接报
+  #   Failed to download metadata for repo 'update': No URLs in mirrorlist
+  # 并整体失败 —— 它不会因为「还有另一个可用的 repo」而放过，所以留着一个坏 repo
+  # 等于让整个包管理器不可用，我们自己那份写得再对也没用。
+  #
+  # 处理成 enabled=0 而不是删文件：厂商配了什么仍然看得见，需要时把它打开即可。
+  local f n=0
+  for f in "$R"/etc/yum.repos.d/*.repo; do
+    [ -f "$f" ] || continue
+    case "$(basename "$f")" in "$DID.repo") continue ;; esac
+    sed -i 's/^enabled *= *1/enabled=0/' "$f"
+    sed -i '1i # 本文件由厂商的 release 包提供，已被构建流程全部置 enabled=0：\n# 它指向的 mirrorlist 服务不覆盖所有版本×架构组合，而 dnf 遇到一个取不到\n# 元数据的 repo 会整体失败。需要时自行打开。可用的源见同目录下另一份。' "$f"
+    n=$((n+1))
+  done
+  [ "$n" = 0 ] || log "  已停掉 $n 份厂商自带 repo（它们的 mirrorlist 不覆盖所有架构）"
   cp "$KEY" "$R/etc/pki/rpm-gpg/$keyname" || die "公钥拷不进镜像"
   : > "$R/etc/yum.repos.d/$DID.repo"
   local i=0 b
@@ -408,5 +429,15 @@ EOF
   # 判据挂在结果上：文件真的非空、真的含 baseurl、公钥真的在。
   grep -q '^baseurl=' "$R/etc/yum.repos.d/$DID.repo" || die "出厂 repo 文件里没有 baseurl"
   [ -s "$R/etc/pki/rpm-gpg/$keyname" ] || die "镜像里的公钥是空文件"
+  # 判据挂在结果上：除我们这份以外不许再有 enabled=1。只做「跑过一遍 sed」
+  # 不算数 —— 厂商换个写法（enabled = 1 带空格、或分号注释）就会漏掉，
+  # 而漏掉的后果是 dnf 整体不可用，且 has_source 那一项照样是 Y。
+  local stray
+  stray=$(grep -l '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*1' \
+            "$R"/etc/yum.repos.d/*.repo 2>/dev/null \
+          | grep -v "/$DID\.repo$" || true)
+  if [ -n "$stray" ]; then
+    die "这些 repo 文件里仍有 enabled=1，dnf 会在它们上面整体失败：$(printf '%s' "$stray" | tr '\n' ' ')"
+  fi
   log "  出厂源已写：$i 个 repo 段，公钥 /etc/pki/rpm-gpg/$keyname"
 }

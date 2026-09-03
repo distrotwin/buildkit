@@ -137,6 +137,20 @@ print([s for s in SEEDS if s not in have])        # 应为空
 
 **按架构不同的基线一定要写条件覆写。** 同一个大版本的 LoongArch 移植常常是独立产品线：麒麟 V10 SP1 的 loong 支是 Loongnix 血脉、glibc 2.28 + gcc 8.3，比 amd64 的 2.31 + gcc 9.3 落后一代；V11 两支编译器相同而 libstdc++ 差一档。用同一套基线会把差异掩盖掉。
 
+**在线源路径要配 `EXTRA_SUITES`，否则镜像会整体落后于安装介质。** 厂商的基础 suite 是冻结的发布树，发布之后的构建放在独立的 `-updates` suite 里——通常就写在官方 sources.list 文档中，但很容易漏配。漏了的后果不是「稍旧」：麒麟 V10 SP1 的 215 个共有包里 150 个落后于 2503 介质，其中 `ca-certificates` 停在 2021-01，比介质旧三年。ABI 不受影响（`libstdc++6`、`libgcc-s1` 与介质完全一致，`libc6` 只差厂商构建号），但旧根证书会让构建期拉 https 失败而客户真机不会——**是假失败，方向比落后更糟**。配上更新源之后还要跑一次 `apt-get upgrade`：档位包逐包安装时自然取最新，但 `libc6`、`base-files`、`dpkg` 来自 debootstrap 阶段一，不升不动。这一步要硬失败：upgrade 非零退出，或者配了 `EXTRA_SUITES` 却一个包版本都没变（源没生效），都必须让构建挂掉，否则镜像会静默地继续发陈旧的包，而那正是配它要修的东西。
+
+**发布之前拿 ISO 清单跟镜像对一次账。** 上面那个缺陷不会被任何现有门禁抓到——镜像能起、能编、符号版本对，全绿。它只在把镜像的 `dpkg-query -W` 输出与盘内装机清单逐包比对时才现形。用 `tools/iso9660.py` 走 HTTP Range 直读 `casper/filesystem.manifest`（或 `live/filesystem.packages`），各约 10 KB，不用下整盘：
+
+```python
+import sys; sys.path.insert(0, 'buildkit/tools')
+from iso9660 import ISO
+iso = ISO("<ISO 直链>"); e = iso.find("casper/filesystem.manifest")
+media = dict(l.split()[:2] for l in iso.cat(e).decode().splitlines() if l.split())
+# 与 docker run --rm IMG dpkg-query -W 的输出逐包比，落后的列出来
+```
+
+对不齐是常态，重点是**知道差在哪、并在 README 里如实写明**：镜像等于公开归档的状态，不等于某张具体介质。想要完全一致只有切那张盘，那是另一条路径——`slice` 路径的镜像天生没有这道缝，因为它本来就是从介质里切出来的。
+
 ## 四、workflow 组织
 
 下游只写一份 `build.yml`，它只做两件事：定义矩阵、调用 buildkit 的可复用 workflow。所有实现都在上游。

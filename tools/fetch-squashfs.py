@@ -7,7 +7,7 @@
 `${ARCH}` 与按架构的 case 块——而 ISO_URL 恰恰每个架构都不同，那样会静默抽到
 另一个架构的盘。取配置一律走 tools/conf-get.sh，由它 source conf（ARCH 已就位）。
 """
-import os, sys, subprocess, hashlib, importlib.util
+import os, sys, time, subprocess, hashlib, importlib.util
 
 url, path, out = sys.argv[1], sys.argv[2], sys.argv[3]
 want = sys.argv[4] if len(sys.argv) > 4 else ''
@@ -30,17 +30,30 @@ if have > size:
     print(f'  已有文件比目标还大（{have} > {size}），重来', flush=True)
     os.remove(out); have = 0
 tries = 0
+stuck = 0
 while have < size:
     tries += 1
-    if tries > 12: sys.exit(f'!! 续传 {tries-1} 轮仍未取满：已 {have} / 目标 {size}')
+    if tries > 30: sys.exit(f'!! 续传 {tries-1} 轮仍未取满：已 {have} / 目标 {size}')
     print(f'  取 {have}..{size}（第 {tries} 轮，已有 {have*100//size}%）', flush=True)
     with open(out, 'ab') as fh:
-        rc = subprocess.call(['curl', '-fsS', '--no-alpn', '-L', '--max-time', '7200',
+        # 不设 --max-time：那是**总传输上限**，区分不了「慢但在进」和「卡死不动」。
+        # 这个 CDN 实测在 1 MB/s 上下且会持续变慢，3 GiB 一趟就要一两小时，
+        # 设了上限只会在半路砍断（curl: (28)），把已下的两三个 G 变成要重连的断点。
+        # 卡死交给 --speed-limit / --speed-time：持续 120 秒低于 10 KB/s 才放弃。
+        rc = subprocess.call(['curl', '-fsS', '--no-alpn', '-L',
+                              '--connect-timeout', '30',
                               '--speed-limit', '10240', '--speed-time', '120',
                               '-r', f'{off+have}-{off+size-1}', url], stdout=fh)
     now = os.path.getsize(out)
     if now == have:
-        sys.exit(f'!! 第 {tries} 轮一个字节都没进（rc={rc}），判定源端不可用')
+        # 一次连接失败不代表源端不可用。给几次退避重连的机会，连续零进展才判死。
+        stuck += 1
+        if stuck >= 3:
+            sys.exit(f'!! 连续 {stuck} 轮一个字节都没进（rc={rc}），判定源端不可用')
+        print(f'    第 {tries} 轮零进展（rc={rc}），退避 {stuck*30} 秒后重连', flush=True)
+        time.sleep(stuck * 30)
+    else:
+        stuck = 0
     have = now
 if have == size:
     print(f'  取满 {size} 字节', flush=True)

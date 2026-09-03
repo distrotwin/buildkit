@@ -1,0 +1,67 @@
+name: 取材可行性探测
+
+# 接一个新 OS 之前先回答两件事：材料拿不拿得到、拿到的是不是完整到能自举。
+# 本机常常给不出结论——国内站点对境外/陌生 IP 的拦截、限流、超时，都会让
+# 「探不通」与「不存在」混在一起。runner 在另一个网段，用它做对照最省事。
+#
+# 纪律：每一类探测都自带阴性对照（构造一个必然不存在的路径），否则分不清
+# 「404 = 没有」与「一律 403/401 = 这台主机不给存在性信号」。
+on:
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "空格分隔的 URL，逐个 HEAD"
+        type: string
+        default: ""
+      apt-repos:
+        description: "空格分隔的 base|suite，按 apt 源探（读 Release、找 libc6）"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 逐个 URL 探测（含阴性对照）
+        if: inputs.urls != ''
+        run: |
+          set -u
+          UA='Mozilla/5.0 (X11; Linux x86_64) Chrome/120'
+          probe(){ timeout 60 curl -sI -H "User-Agent: $UA" -o /dev/null \
+                     -w '%{http_code} len=%header{content-length}' "$1" 2>&1 | tail -1; }
+          for u in ${{ inputs.urls }}; do
+            printf '%-84s %s\n' "${u:0:82}" "$(probe "$u")"
+            # 同主机同目录下构造一个必然不存在的名字作对照
+            ctl="${u%/*}/__no_such_file_9999.bin"
+            printf '  ↳ 阴性对照 %-70s %s\n' "${ctl:0:68}" "$(probe "$ctl")"
+          done
+
+      - name: 按 apt 源探测
+        if: inputs.apt-repos != ''
+        run: |
+          set -u
+          UA='Mozilla/5.0 (X11; Linux x86_64) Chrome/120'
+          for spec in ${{ inputs.apt-repos }}; do
+            base="${spec%%|*}"; suite="${spec##*|}"
+            echo "════ $base  suite=$suite"
+            rel=$(timeout 90 curl -sS -H "User-Agent: $UA" "${base%/}/dists/$suite/Release" 2>&1)
+            if ! printf '%s' "$rel" | grep -q '^Suite:'; then
+              echo "  取不到 Release：$(printf '%s' "$rel" | head -c 200)"
+              printf '  阴性对照（构造 suite）：'
+              timeout 60 curl -sI -o /dev/null -w '%{http_code}\n' "${base%/}/dists/__nosuch9999/Release" 2>&1|tail -1
+              continue
+            fi
+            printf '%s' "$rel" | grep -E '^(Origin|Label|Suite|Codename|Version|Date|Components|Architectures):' | sed 's/^/  /'
+            comps=$(printf '%s' "$rel" | sed -n 's/^Components: //p' | head -1)
+            echo "  ── 逐 component 找 libc6（这一步是关键：libc6 在哪个 component 因 suite 而异）"
+            for c in $comps; do
+              url="${base%/}/dists/$suite/$c/binary-amd64/Packages.gz"
+              v=$(timeout 300 curl -fsS -H "User-Agent: $UA" "$url" 2>/dev/null | zcat 2>/dev/null \
+                  | awk '/^Package: libc6$/{f=1} f&&/^Version:/{print $2; exit}')
+              n=$(timeout 300 curl -fsS -H "User-Agent: $UA" "$url" 2>/dev/null | zcat 2>/dev/null | grep -c '^Package: ' || echo 0)
+              printf '    %-14s 包数=%-7s libc6=%s\n' "$c" "$n" "${v:-（无）}"
+            done
+          done

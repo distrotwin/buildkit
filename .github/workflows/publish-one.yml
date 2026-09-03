@@ -150,7 +150,20 @@ jobs:
             MG=$(jq -r '.measured.glibc // ""' "$RJ")
             ML=$(jq -r '.measured.libstdcpp // ""' "$RJ")
             MX=$(jq -r '.measured.glibcxx // ""' "$RJ")
-            SUITE=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SUITE)
+            # 溯源锚点按构建路径不同：在线源那几条靠 suite 定位快照，切片路径没有 suite
+            # （它从 ISO 抽 squashfs），锚点是 ISO 与 squashfs 指纹。写死 cn.internal.suite
+            # 会在切片路径上留一个空值 label——空值比缺失更糟，空值门禁因此把统信那批
+            # 发布整个拦下了。改为按 conf 里实际有什么就记什么，一个都没有才失败。
+            # 取值必须带 ARCH：ISO_URL 与 SQUASHFS_SHA256 都是按架构分支的，
+            # 不传就会拿到 runner 自身架构那一支，给 arm64 的镜像贴上 amd64 的锚点。
+            PROV=()
+            SUITE=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SUITE)
+            if [ -n "$SUITE" ]; then PROV+=(-c "LABEL cn.internal.suite=$SUITE"); fi
+            IURL=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' ISO_URL)
+            if [ -n "$IURL" ]; then PROV+=(-c "LABEL cn.internal.iso-url=$IURL"); fi
+            SQSHA=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SQUASHFS_SHA256)
+            if [ -n "$SQSHA" ]; then PROV+=(-c "LABEL cn.internal.squashfs-sha256=$SQSHA"); fi
+            [ ${#PROV[@]} -gt 0 ] || { echo "::error::既无 suite 也无 ISO，记不下溯源锚点"; exit 1; }
 
             # 溯源信息在这里打而不是 import 时，是因为 commit SHA 与 run URL 只有发布
             # 阶段才知道，而两条构建路径的 import 分处两个脚本——写在那儿会变成
@@ -171,9 +184,9 @@ jobs:
               -c "LABEL org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
               -c "LABEL org.opencontainers.image.revision=$KSHA" \
               -c "LABEL org.opencontainers.image.version=$PFX-$TIER-$STAMP" \
-              -c "LABEL cn.internal.kylin-commit=$KSHA" \
+              -c "LABEL cn.internal.repo-commit=$KSHA" \
               -c "LABEL cn.internal.buildkit-commit=$BSHA" \
-              -c "LABEL cn.internal.suite=$SUITE" \
+              "${PROV[@]}" \
               -c "LABEL cn.internal.arch=$a" \
               -c "LABEL cn.internal.glibc=$MG" \
               -c "LABEL cn.internal.libstdcpp=$ML" \

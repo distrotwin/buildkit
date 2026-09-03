@@ -203,6 +203,12 @@ templates/ 下游仓库的起始模板
 
 **循环体里的条件动作写 `if`，不要写 `[ 条件 ] && 动作`。** 后者作为 `while` 循环体的最后一句时，最后一次迭代若条件为假就返回 1，`while` 跟着返回 1；若这个 `while` 又在管道里（`find ... | while`），管道返回 1，`bash -e` 直接判整步失败。这个缺陷特别能骗人：产物已经正确生成，步骤却红着退出，而且只有「自己的东西恰好排在末尾」的那一路侥幸通过，看起来像随机失败。
 
+**门禁不能和它要守的前提共用同一个 `if`。** 加 `EXTRA_SUITES` 时我在 inner 脚本里写了两条硬断言（"配了却没有任何包版本变化就失败"），但它们都在 `if [ -n "${EXTRA_SUITES:-}" ]` 里面，而真正失效的恰恰是这个变量本身——`build-selfhost.sh` 用显式 `-e` 白名单往容器传变量，漏了它。于是整块代码连断言一起被跳过，六个构建全绿，发出去的镜像和改动前一字不差。**守卫与被守卫的东西共享同一个前提时，守卫就是空的。** 正确做法是把判据放到别处或挂在产物上：一道在容器建好后 `docker inspect` 核 `Config.Env` 里的值等于 conf 的值（在 inner 之外），一道在 `docker export` 之后核出厂 `sources.list` 真的含每个更新源（挂在产物上），原有那道留在 inner 里作为第三重。
+
+**不要用 `set +e` / `set -e` 捕获退出码。** `set -e` 作用于整个 shell 而非单条语句，所以在一个本来只开 `set -u` 的脚本里"临时关掉再打开"，等于给后续所有代码悄悄换了一套失败语义。实测后果：`lib/common.sh` 里 `rm -f /etc/hostname /etc/resolv.conf /etc/hosts`（容器内这三个是 docker 的 bind mount，必然 EBUSY，而删不掉毫无后果——bind mount 的内容不会进 `docker export`）存在很久、一直在打印错误、一直无害，被泄漏的 errexit 一下变成中止构建。写成 `cmd || _rc=$?`：只影响这一条语句，且在 errexit 开着的脚本里同样安全，因为 `||` 的存在本身就让 errexit 不触发。
+
+**全量 `apt-get upgrade` 会碰到带 systemd unit 的包，容器里必挂。** 逐包安装档位包碰不到这个问题——档位清单里那些包都不带 unit。一旦做全量升级，`postinst` 里调 `systemctl` 的包就会报 `System has not been booted with systemd as init system (PID 1). Can't operate.`（麒麟 V10 SP1 的 `kyseclog-daemon` 就是）。两条拦截路径都要堵：`policy-rc.d` 返回 101 只被 `invoke-rc.d` 与 `deb-systemd-invoke` 尊重，直调 `systemctl` 绕过它，得用 `dpkg-divert` 把 `systemctl` 临时改道到 `/bin/true`；`systemctl` 压根不存在时也要铺一个 stub，否则 postinst 会以"命令找不到"失败、症状不同后果一样。**改道必须在升级后撤掉并断言撤回成功**——出厂镜像若带一个指向 `/bin/true` 的 `systemctl`，在镜像里毫无症状，所有检查都会过，用户直到要管服务时才发现。判据写成"它还指不指着 `/bin/true`"加"divert 表里还有没有那条"，不要写成"必须是真文件"：有的系统里 `systemctl` 本身就是软链，那样会误杀。
+
 ## 六、门禁
 
 下面这些是发布路径上的最低配置，新仓库不能少。每一条都对应一个真实发生过的缺陷。

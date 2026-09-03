@@ -105,8 +105,14 @@ DISTROS=${DISTROS:-$(ls "$ROOT"/distros/*.conf 2>/dev/null | xargs -r -n1 basena
 # 而来，而每一条读起来都像真缺陷。
 _seen=""; _dup=""
 for _d in $DISTROS; do
-  _i=$(. "$ROOT/distros/$_d.conf" >/dev/null 2>&1; printf '%s' "${IMAGE:-}")
-  [ -n "$_i" ] || { echo "✗ distros/$_d.conf 没有 IMAGE" >&2; exit 2; }
+    # 用 conf-get.sh 取值而不是直接 source：conf 里可以引用 ARCH 派生的变量
+    # （$MULTIARCH、$RPMARCH），直接 source 而不先备好它们会在 set -u 下当场死掉，
+    # 而把 stderr 丢掉之后表现成「conf 没有 IMAGE」—— 那个报错离真因隔着一层，
+    # 实测在接 rpm 系被试时正好踩到（conf 里用了 $RPMARCH）。
+    _err=$(ARCH="$ARCH" ROOT="$ROOT" BK="$BK" "$BK/tools/conf-get.sh" "$_d" IMAGE 2>&1 >/dev/null) || {
+      echo "✗ distros/$_d.conf 读不出来：$_err" >&2; exit 2; }
+    _i=$(ARCH="$ARCH" ROOT="$ROOT" BK="$BK" "$BK/tools/conf-get.sh" "$_d" IMAGE)
+    [ -n "$_i" ] || { echo "✗ distros/$_d.conf 没有 IMAGE（文件读得进来，但这一项是空的）" >&2; exit 2; }
   case " $_seen " in *" $_i "*) _dup="$_dup $_i";; esac
   _seen="$_seen $_i"
 done
@@ -127,6 +133,8 @@ for DID in $DISTROS; do
         EXPECT_CXX EXPECT_OS_REPO \
         SRC_ROOTFS ISO_URL ISO_SQUASHFS_PATH SQUASHFS_SHA256 DEBOOTSTRAP_SCRIPT \
         FAMILY EXPECT_SHADOW NO_CHECK_GPG RPM_DB_BACKEND MEDIA_DIR REPO_BASES RPM_KEY RPM_KEY_FP
+  # 同上：conf 可能引用 ARCH 派生的变量，先把它们备好再 source。
+  . "$BK/lib/arch.sh"
   . "$ROOT/distros/$DID.conf"
   for TIER in ${TIERS:-micro base devel}; do
     IMG="$IMAGE:$TIER"

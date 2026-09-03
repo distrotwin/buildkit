@@ -281,9 +281,30 @@ def main():
         if want_fp not in fps:
             sys.exit("公钥指纹不符：期望 %s，文件里是 %s" % (want_fp, ", ".join(fps) or "（读不出）"))
         print("  公钥指纹已核对: %s" % want_fp)
+        # rpm 4.20 起用 Sequoia 做 OpenPGP 后端，默认策略拒绝 SHA-1 的密钥绑定签名。
+        # 厂商这把 key 建于 2019-04-10、自签名的 digest algo 是 2（SHA-1），于是
+        # `rpm --import` 报 "Policy rejects ...: No binding signature at time <现在>"
+        # —— 那句话读起来像密钥过期，其实这把 key 到 2029 才到期，被拒的是哈希算法。
+        #
+        # 放宽这一条是可接受的，因为**信任根是上面核过的指纹，不是 key 自签名的抗碰撞性**：
+        # 我们并不依据自签名去认定这把 key 属于谁，那由硬编码的 KEY_FP 决定。
+        # 放宽只作用于本次验签用的临时 keyring，不写进镜像也不改宿主策略。
+        pol = os.path.join(dst, ".sequoia-policy")
+        with open(pol, "w") as f:
+            f.write("[hash_algorithms]\n"
+                    "sha1.collision_resistance = 2100-01-01\n"
+                    "sha1.second_preimage_resistance = 2100-01-01\n")
+        renv = dict(os.environ, SEQUOIA_CRYPTO_POLICY=pol)
         kr = os.path.join(dst, ".keyring")
-        subprocess.run(["rpm", "--root", kr, "--initdb"], check=True)
-        subprocess.run(["rpm", "--root", kr, "--import", keyfile], check=True)
+        subprocess.run(["rpm", "--root", kr, "--initdb"], check=True, env=renv)
+        subprocess.run(["rpm", "--root", kr, "--import", keyfile], check=True, env=renv)
+        # 导入成功要有据可查：import 静默失败的话下面每个包都会报 NOKEY，
+        # 那时真因离现场已经隔了一层。
+        kq = subprocess.run(["rpm", "--root", kr, "-qa", "gpg-pubkey*"],
+                            capture_output=True, text=True, env=renv)
+        if not kq.stdout.strip():
+            sys.exit("公钥导入后 keyring 里查不到 gpg-pubkey，验签无从谈起")
+        print("  keyring 已就绪: %s" % kq.stdout.strip().replace("\n", " "))
         # 判据必须是字面的 "signatures OK"。两个坑：
         #   · 未签名的包 `rpm -K` 会打印 "digests OK" 并返回 0 —— 只看退出码或只找
         #     "OK" 会让无签名的包蒙混过关，而验签的全部意义就是拦住这种。
@@ -293,7 +314,7 @@ def main():
         for n in names:
             p = subprocess.run(["rpm", "--root", kr, "-K",
                                 os.path.join(dst, "Packages", n)],
-                               capture_output=True, text=True)
+                               capture_output=True, text=True, env=renv)
             out = (p.stdout or "") + (p.stderr or "")
             good = (p.returncode == 0
                     and "signatures OK" in out

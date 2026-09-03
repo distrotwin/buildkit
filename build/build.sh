@@ -292,19 +292,30 @@ build_rpmrepo() {
     python3 "$BK/tools/rpmrepo-fetch.py" "$MEDIA" "$seeds" $REPO_BASES \
     || die "[$DID/$TIER] 取材失败"
 
-  # 时间锚点取源的 revision（取材时写进 .epoch）。这里必须显式设上：
-  # make_tarball 的兜底值是硬编码常量 1700000000，那是个假锚点 —— 看着有值，
-  # 但和产物毫无关系，可复现性会静默失效。
-  if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+  # 时间锚点。必须来自源的 repomd revision（取材时写进 .epoch），或者 conf 显式钉的值。
+  #
+  # 不能写成 `if [ -z "$SOURCE_DATE_EPOCH" ]`：build.sh 在分派之前已经调过
+  # derive_epoch，而它对没有 Release 可读的路径会回落到硬编码常量 1700000000。
+  # 那个值非空、而且落在任何「合理年份」区间内，所以范围检查放它过去 —— 假锚点
+  # 正是这样活下来的。判据得是「它从哪来」而不是「它像不像个日期」。
+  _conf_epoch=$(ARCH="$ARCH" ROOT="$ROOT" BK="$BK" "$BK/tools/conf-get.sh" "$DID" SOURCE_DATE_EPOCH)
+  if [ -n "$_conf_epoch" ]; then
+    SOURCE_DATE_EPOCH="$_conf_epoch"
+    log "[$DID/$TIER] SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH（conf 显式钉的）"
+  else
     SOURCE_DATE_EPOCH=$(cat "$MEDIA/.epoch" 2>/dev/null || echo "")
-    export SOURCE_DATE_EPOCH
+    log "[$DID/$TIER] SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH（源 repomd revision）"
   fi
+  export SOURCE_DATE_EPOCH
   case "${SOURCE_DATE_EPOCH:-}" in
     ''|*[!0-9]*) die "SOURCE_DATE_EPOCH 取不到或不是数字: '${SOURCE_DATE_EPOCH:-}'" ;;
   esac
   [ "$SOURCE_DATE_EPOCH" -gt 1600000000 ] \
     || die "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH 早于 2020，不像真锚点"
-  log "[$DID/$TIER] SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH（源 revision）"
+  # 兜底常量本身要当作错误拦掉：conf 没钉、又恰好等于它，只能是回落来的。
+  if [ -z "$_conf_epoch" ] && [ "$SOURCE_DATE_EPOCH" = 1700000000 ]; then
+    die "SOURCE_DATE_EPOCH 等于 make_tarball 的兜底常量 1700000000，说明取的不是源 revision"
+  fi
 
   local D="$ROOT/work/$DID-$TIER"
   rm -rf "$D"; mkdir -p "$D"

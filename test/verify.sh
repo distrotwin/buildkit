@@ -295,7 +295,11 @@ for DID in $DISTROS; do
                # 值会变成 NOUPDATE，这条就会失败。
                case "$(g apt_roundtrip)" in
                  NOUPDATE) fail "apt_roundtrip: apt-get update 失败了 — $(g apt_update_err)" ;;
-                 N*not-installed*) pass "apt_roundtrip 如期无 OS 包可装（OSTree+玲珑分发）" ;;
+                 # 任何 N* 都是预期形态：它表示「装没装上、包不在」，这正是无 OS 源时该有的
+                 # 结果。不要去匹配括号里的文字——那是 dpkg 状态库的偶然写法：V25 上
+                 # `dpkg -s nano` 返回带 not-installed 的状态串，V20 上根本没有这条记录，
+                 # 值就成了 N(未装)。两者语义相同，按串匹配会把同一件事判成两回事。
+                 N*) pass "apt_roundtrip 如期无 OS 包可装（源里只有应用商店条目）：$(g apt_roundtrip)" ;;
                  Y) pass "apt_roundtrip 竟然可装 OS 包（源内容变了，需复核期望）" ;;
                  *) fail "apt_roundtrip 形态未预期: $(g apt_roundtrip)" ;;
                esac

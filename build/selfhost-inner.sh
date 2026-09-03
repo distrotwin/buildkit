@@ -81,6 +81,13 @@ else
   APT_OPT="signed-by=/usr/share/keyrings/kylin-archive-keyring.gpg"
 fi
 printf 'deb [%s] %s %s %s\n' "$APT_OPT" "$MIRROR" "$SUITE" "$COMPONENTS" > /etc/apt/sources.list
+# 更新源：基础 suite 是冻结的发布树，厂商把后续构建放在独立的 -updates suite 里
+# （麒麟 V10 SP1 的 10.1-2403-updates / 10.1-2203-updates 就写在官方 sources.list 文档里）。
+# 不配它们镜像会停在发布时的包版本——实测 ca-certificates 停在 2021 年、比安装介质旧三年，
+# 构建时拉 https 会因缺新根证书而失败，而客户真机不会。这类是「假失败」，方向比落后更糟。
+for _es in ${EXTRA_SUITES:-}; do
+  printf 'deb [%s] %s %s %s\n' "$APT_OPT" "$MIRROR" "$_es" "$COMPONENTS" >> /etc/apt/sources.list
+done
 printf 'APT::Key::gpgvcommand "gpgv";\n' > /etc/apt/apt.conf.d/docker-gpgv
 if [ -n "${PIN_NEVER:-}" ]; then
   { for p in $PIN_NEVER; do printf 'Package: %s\nPin: release *\nPin-Priority: -1\n\n' "$p"; done; } \
@@ -89,6 +96,20 @@ fi
 apt-get update -qq 2>&1 | tail -1
 apt-get install -y -qq --reinstall base-files >/dev/null 2>&1 || true
 dpkg --configure -a >/dev/null 2>&1 || true
+
+# 配了更新源就先把 debootstrap 阶段装的基础包升上去。档位包由下面逐包安装时
+# 自然取到最新版，但 libc6 / base-files / dpkg 来自阶段一，不升就停在发布树版本。
+if [ -n "${EXTRA_SUITES:-}" ]; then
+  _before=$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum | cut -c1-12)
+  apt-get upgrade -y -qq --no-install-recommends -o Dpkg::Use-Pty=false 2>&1 | grep -iE '^E:|segmentation' | head -3
+  dpkg --configure -a >/dev/null 2>&1 || true
+  _after=$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum | cut -c1-12)
+  if [ "$_before" = "$_after" ]; then
+    say "  ⚠ 配了 EXTRA_SUITES 却没有任何包版本变化，更新源可能没生效"
+  else
+    say "  基础包已按更新源升级（${EXTRA_SUITES}）"
+  fi
+fi
 
 # ③ 装档位包（逐包，规避大事务里的厂商 dpkg 缺陷）
 # 注意：apt-get 的退出码不能被管道丢掉，且 `apt-get check` **只验已装包之间的依赖一致性**，
@@ -153,6 +174,10 @@ if [ -f /dosbuild-lib/common.sh ]; then
       say "出厂 sources.list 留空：构建期源 $MIRROR 是本地介质，非网络源"
   else
     SRCLIST="deb [$APT_OPT] $MIRROR $SUITE $COMPONENTS"
+    for _es in ${EXTRA_SUITES:-}; do
+      SRCLIST="$SRCLIST
+deb [$APT_OPT] $MIRROR $_es $COMPONENTS"
+    done
   fi
   adapt_container / "$SRCLIST" "${DID:-}"
   slim_locales /

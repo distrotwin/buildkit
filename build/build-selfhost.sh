@@ -46,6 +46,10 @@ if [ "${NO_CHECK_GPG:-no}" = yes ]; then
   log "[$DID] 源为介质本地仓库，跳过 InRelease 验签（完整性锚点是 ISO 的官方校验值）"
 else
   docker exec "$BUILDER" bash -c "unset http_proxy https_proxy; ROOT=$CROOT BK=$CBK . $CBK/lib/common.sh; verify_repo_signature '${MIRROR%/}' '$SUITE'" || exit 1
+  # 更新源同样要验签：它们和基础 suite 一样会把包装进镜像，漏验等于留一条没有信任根的进货渠道
+  for _es in ${EXTRA_SUITES:-}; do
+    docker exec "$BUILDER" bash -c "unset http_proxy https_proxy; ROOT=$CROOT BK=$CBK . $CBK/lib/common.sh; verify_repo_signature '${MIRROR%/}' '$_es'" || exit 1
+  done
 fi
 
 # ── 阶段 1：--foreign 纯解包
@@ -66,7 +70,7 @@ fi
 # `debootstrap --exclude` 之后旧 stage 被直接复用 —— 改动完全没生效，日志里连
 # --exclude 那行都不打印（整个阶段 1 被跳过）。漏一个输入等于把「改了配置」
 # 静默降级成「什么都没改」，而且不报错，最容易让人去怀疑修法本身。
-STAGE_FP=$(printf '%s|%s|%s|%s|%s|%s' "$MIRROR" "$SUITE" "$COMPONENTS" "${STAGE_INCLUDE:-}" "${PIN_NEVER:-}" "$KEYRING_FP" | sha256sum | cut -c1-16)
+STAGE_FP=$(printf '%s|%s|%s|%s|%s|%s|%s' "$MIRROR" "$SUITE" "${EXTRA_SUITES:-}" "$COMPONENTS" "${STAGE_INCLUDE:-}" "${PIN_NEVER:-}" "$KEYRING_FP" | sha256sum | cut -c1-16)
 # STAGE_FROM_TAR 时必须连阶段 1 一起跳过：新 job 里 work 目录不存在，
 # .foreign-done 指纹必然不匹配，debootstrap 会照跑一遍——传 tar 就白传了，
 # 而且不报错，只是慢二十来分钟，最容易被当成「拆分没带来收益」。

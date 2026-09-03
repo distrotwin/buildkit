@@ -153,6 +153,35 @@ media = dict(l.split()[:2] for l in iso.cat(e).decode().splitlines() if l.split(
 
 对不齐是常态，重点是**知道差在哪、并在 README 里如实写明**：镜像等于公开归档的状态，不等于某张具体介质。想要完全一致只有切那张盘，那是另一条路径——`slice` 路径的镜像天生没有这道缝，因为它本来就是从介质里切出来的。
 
+### rpm 系特有的坑
+
+第一次接 rpm 系（麒麟信安）时踩的，都不是这一家特有的。
+
+**先探宿主可达性，再定取材路径。** 厂商放 ISO 的那台主机和放软件源的那台主机是两回事，可达性要分别验。麒麟信安的 `mirrorlists.kylinsec.com.cn` 对 GitHub runner **全量 403**，且真文件与不存在的路径同样 403（不给存在性信号）；而它的公开 rpm 源 `mirrorlist.kylinsec.com.cn:8888`（主机名单数、端口不同）200/404 分明、秒级可达。用 `probe-source.yml` 从 runner 那个网段探，别用本机的结论下判断——本机还可能因为继承了 `https_proxy` 而把请求送到境外出口，表现成一样的 403。
+
+**跨发行版 bootstrap 只能 `--noscripts`，而 `%post` 承担了一部分文件系统状态的构造。** 于是 rpm 的文件清单**系统性地过度承诺**：它声明的一部分路径要靠脚本才真的出现。这一族缺陷的共同形状是「包数据库自洽、文件系统不自洽」，所以 `rpm -qa`、`rpm -V --nofiles` 全都过，只有真去用那个文件才暴露。已知要逐类重放的有四项，判据一律挂在产物上而不是「脚本跑过了」：
+
+| 被跳过的 `%post` | 症状 | 判据 |
+|---|---|---|
+| `update-ca-trust extract` | CA bundle 是悬空软链，所有 TLS 握手失败 | bundle 存在且够大 |
+| `ldconfig` | `/etc/ld.so.cache` 从未生成 | cache 非空，且 `systemctl` 真能跑 |
+| `update-crypto-policies` | `back-ends/` 空，指进去的软链成片悬空 | 目录非空 |
+| `alternatives --install` | 清单里有 `/usr/bin/ld` 而文件不在，`collect2: cannot find 'ld'` | 链接真的出现 |
+
+最后一项只在麒麟信安 V3.4 上暴露、V6 不受影响（它的 binutils 直接给出 `/usr/bin/ld`），又一次印证「同一族系不同版本的差异是突破口」。做法是只从 scriptlet 里抽 `alternatives --install` 那几条执行（实测全部已装包里只有 3 条），不跑厂商任意脚本；续行要先拼起来，否则四个参数会被截断。
+
+**数据库后端可能两端没有交集。** 装库用的是 builder 的 rpm，读库的是目标自带的 rpm。麒麟信安 V3.4 的 rpm 4.15.1 **只支持 bdb**，而 builder 的 rpm 4.20 自 4.19 起去掉了 bdb 写支持——更麻烦的是指定 `bdb` 它会**接受参数、返回 0、一个文件都不建**。这种静默无操作会让后面每一步都「成功」，直到最后 `rpm -qa` 读出 0 个包，而那个症状与「空镜像」不可区分。两条应对：`initdb` 紧后面就断言真的建出了数据库文件（判据前移的价值在于报错离真因更近）；两端谈不成时用 `RPM_DB_VIA_TARGET=yes`，文件由宿主 rpm 落位、包登记交给目标自己的 rpm 用 `--justdb` 重做。
+
+**厂商自带的 repo 要停掉，只留自己验证过的那份。** `<厂商>-release` 包会装一批 `enabled=1` 的 repo，指向一个 mirrorlist 服务，而那个服务**并不覆盖所有版本×架构组合**（实测 `osversion=6 & repo=update & arch=loongarch64` 返回 0 个 URL）。dnf 遇到一个取不到元数据的 repo 会**整体失败**，不会因为「还有另一个可用的 repo」而放过——所以只追加自己那份等于让整个包管理器不可用。处理成 `enabled=0` 而不是删文件，并加一道结果判据：除自己那份以外不许再有 `enabled=1`（「跑过一遍 sed」不算数，厂商换个写法就会漏，而漏掉时 `has_source` 照样是 Y）。
+
+**出厂源要写 repo 文件加公钥两件。** 只写 repo 文件而不把公钥放进 `/etc/pki/rpm-gpg/`，dnf 会在首次装包时停下来问是否导入 key，非交互下表现为装不上，而 `has_source` 照样是 Y。`gpgcheck` 一律开：关掉它能让往返检查更容易过，但那是把判据往下调去迁就实现。
+
+**`rpm -K` 的判据必须是字面 `signatures OK`。** 未签名的包 `rpm -K` 会打印 `digests OK` 并返回 0——只看退出码或只找子串 `OK` 会让无签名的包蒙混过关，而 `NOT OK` 里也含 `OK`。另外 rpm 4.20 起用 Sequoia 做 OpenPGP 后端，默认策略拒绝 SHA-1 的密钥绑定签名，报错写「No binding signature at time <现在>」读起来像密钥过期，实际被拒的是哈希算法；放宽这一条是可接受的，因为信任根是导入前核过的**指纹**，不是 key 自签名的抗碰撞性。
+
+**LoongArch 的世代不能靠架构名判。** deb 世界用名字区分（`loongarch64` 旧、`loong64` 新），而 **rpm 世界两个世界都叫 `loongarch64`**。判据落在动态链接器上：`/lib64/ld-linux-loongarch-lp64d.so.1` 是新世界，`/lib64/ld.so.1` 是旧世界。上游 QEMU 只实现新世界，所以这一项直接决定这一支能不能在托管 runner 上造出来。
+
+**包管理往返的上限要按源的地理位置给。** 原来写死 180 秒，而国内源配境外 runner 拉一个 15000 个包的仓库元数据要几分钟：实测 CI 上那一步整步 189 秒、上限 180，于是判定「镜像装不上包」，而本地同一个镜像装得上。**同一份镜像在两个网络位置得出相反结论**时，先怀疑判据把网络距离算成了缺陷。
+
 ## 四、workflow 组织
 
 下游只写一份 `build.yml`，它只做两件事：定义矩阵、调用 buildkit 的可复用 workflow。所有实现都在上游。

@@ -234,6 +234,25 @@ def main():
     # 报 error while loading shared libraries）。
     if os.path.exists(os.path.join(dst, "sbin/ldconfig")) or \
        os.path.exists(os.path.join(dst, "usr/sbin/ldconfig")):
+        # 与 update-ca-trust 同因：crypto-policies 的 %post 会把
+        # /usr/share/crypto-policies/<策略>/ 里的模板展开到 /etc/crypto-policies/back-ends/。
+        # --noscripts 跳过它之后那个目录是空的，于是 /etc/krb5.conf.d/crypto-policies
+        # 这类指进去的软链全部悬空 —— 实测 V3.4 的 dangling_etc 检查就是这么报出来的，
+        # 而报文里只有 basename「crypto-policies」，离真因隔着一层。
+        _ucp = os.path.join(dst, "usr/bin/update-crypto-policies")
+        if os.path.exists(_ucp):
+            print("补跑 update-crypto-policies（--noscripts 跳过的 %post）…")
+            subprocess.run(["chroot", os.path.abspath(dst), "/usr/bin/update-crypto-policies",
+                            "--no-reload", "--set", "DEFAULT"],
+                           capture_output=True, text=True, timeout=180)
+            _be = os.path.join(dst, "etc/crypto-policies/back-ends")
+            _n = len(os.listdir(_be)) if os.path.isdir(_be) else 0
+            if _n == 0:
+                sys.exit("update-crypto-policies 跑完 back-ends 仍是空的，"
+                         "指进去的软链会全部悬空")
+            print("    crypto-policies back-ends 就绪：%d 个文件" % _n)
+
+
         print("生成 /etc/ld.so.cache（--noscripts 跳过的 ldconfig）…")
         subprocess.run(["chroot", os.path.abspath(dst), "/sbin/ldconfig"],
                        capture_output=True, text=True, timeout=300)

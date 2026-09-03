@@ -332,6 +332,32 @@ def main():
 
     # ⑥ 写一份只含闭包的 primary.xml.gz，href 改成 Packages/<文件名>。
     #    形状与 ISO 上的 repodata 一致，rpmmedia.py 因此完全不用改。
+    # 把 filelists 解析出来的路径能力**写进提供者的 provides**，让物化出的 primary
+    # 自描述。不这么做的话下游 rpmmedia.py 会在这份 primary 上重算闭包，而它只解析
+    # primary、拿不到 filelists，于是路径型依赖的提供者被它自己排除掉 —— 实测取材
+    # 算出 139 个包而它只装了 138 个，差的正是 /usr/bin/pkg-config 的提供者，
+    # 症状是装完的依赖自洽检查报「未满足依赖」。
+    _inject = 0
+    _byname = {r["name"]: r for r in sel}
+    for cap, owners in provides.items():
+        if not cap.startswith("/"):
+            continue
+        for owner in owners:
+            r = _byname.get(owner)
+            if r is None:
+                continue
+            fmt = r["el"].find("c:format", NS)
+            if fmt is None:
+                continue
+            pe = fmt.find("r:provides", NS)
+            if pe is None:
+                pe = ET.SubElement(fmt, "{%s}provides" % NS["r"])
+            if not any(e.get("name") == cap for e in pe.findall("r:entry", NS)):
+                ET.SubElement(pe, "{%s}entry" % NS["r"], {"name": cap})
+                _inject += 1
+    if _inject:
+        print("  已把 %d 条路径能力写进 provides（让 primary 自描述）" % _inject)
+
     root = ET.Element("{%s}metadata" % NS["c"], {"packages": str(len(sel))})
     for r in sel:
         el = r["el"]
@@ -347,6 +373,11 @@ def main():
     # ⑦ 时间锚点：取各源 revision 的最大值。这是真实时间戳，
     #    不是随手填的常量 —— 常量看着有值，其实是假锚点。
     epoch = max(r for _, r in revs)
+    # 把闭包条数写下来给下游核对。下游会在这份 primary 上**重算**闭包，两个数
+    # 必须一致；不一致说明这份 primary 不足以自描述（少了某个能力的提供者），
+    # 而那种情况下下游会"成功地"少装几个包。
+    with open(os.path.join(dst, ".closure-count"), "w") as f:
+        f.write("%d\n" % len(sel))
     with open(os.path.join(dst, ".epoch"), "w") as f:
         f.write("%d\n" % epoch)
     print("  SOURCE_DATE_EPOCH 锚点 = %d（各源 revision 取最大）" % epoch)

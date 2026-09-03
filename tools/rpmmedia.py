@@ -94,6 +94,17 @@ def main():
     print(f"介质仓库 {len(pkgs)} 个包，{len(provides)} 个能力")
     keep, unresolved = closure(pkgs, provides, seeds)
     print(f"种子 {len(seeds)} 个 -> 闭包 {len(keep)} 个包")
+    # 取材阶段若留下 .closure-count，就核对两侧算出的闭包一致。差异意味着这份
+    # primary 不足以自描述（例如路径型依赖的提供者没有登记进 provides），
+    # 而后果是这里"成功地"少装几个包，直到装完的依赖自洽检查才报未满足依赖。
+    _cc = os.path.join(media, ".closure-count")
+    if os.path.exists(_cc):
+        _want = int(open(_cc).read().strip() or 0)
+        if _want != len(keep):
+            sys.exit("取材算出闭包 %d 个，这里重算得 %d 个。"
+                     "物化出的 primary 不足以自描述，少的那几个包会被静默漏装。"
+                     % (_want, len(keep)))
+        print("  闭包条数与取材一致：%d" % _want)
     if unresolved:
         pathdeps = sorted(c for c in unresolved if c.startswith("/"))
         other = sorted(c for c in unresolved if not c.startswith("/"))

@@ -123,12 +123,15 @@ if [ -n "${EXTRA_SUITES:-}" ]; then
   _before=$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum | cut -c1-12)
   # 退出码不能被管道丢掉（同下面第 ③ 步的理由）。conffile 一律留旧的：厂商包里
   # 有交互式 conffile，不指定就会挂在提示上直到 job 超时。
-  set +e
+  # 用 `|| _rc=$?` 捕获退出码，不要碰 shell 选项。本脚本通篇只开 set -u；早先这里
+  # 写成 `set +e ... set -e`，那个 set -e 会把 errexit 给**后面整段脚本**都打开，
+  # 于是 lib/common.sh 里 `rm -f /etc/hostname /etc/resolv.conf /etc/hosts`
+  # （容器内这三个是 docker 的 bind mount，必然 EBUSY）从"打印错误但无碍"变成
+  # 中止构建。改动 shell 选项的影响面从来不止改动处那几行。
+  _rc=0
   apt-get upgrade -y --no-install-recommends \
     -o Dpkg::Use-Pty=false -o Dpkg::Options::=--force-confold \
-    > /tmp/upgrade.log 2>&1
-  _rc=$?
-  set -e
+    > /tmp/upgrade.log 2>&1 || _rc=$?
   grep -iE '^E:|segmentation|dpkg: error' /tmp/upgrade.log | head -5 || true
   _after=$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum | cut -c1-12)
 

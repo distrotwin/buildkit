@@ -298,7 +298,12 @@ build_rpmrepo() {
   # derive_epoch，而它对没有 Release 可读的路径会回落到硬编码常量 1700000000。
   # 那个值非空、而且落在任何「合理年份」区间内，所以范围检查放它过去 —— 假锚点
   # 正是这样活下来的。判据得是「它从哪来」而不是「它像不像个日期」。
-  _conf_epoch=$(ARCH="$ARCH" ROOT="$ROOT" BK="$BK" "$BK/tools/conf-get.sh" "$DID" SOURCE_DATE_EPOCH)
+  # env -u 是必须的：conf-get.sh 取值时写的是 ${VAR:-}，而 build.sh 开头已经
+  # export 过 SOURCE_DATE_EPOCH（derive_epoch 的结果）。不剥掉的话读回来的是
+  # 环境里那个兜底常量而不是 conf 里的值，于是「conf 有没有钉」这个判断永远为真，
+  # 拦截形同不存在 —— 探针继承了它要测量的东西。
+  _conf_epoch=$(env -u SOURCE_DATE_EPOCH \
+    ARCH="$ARCH" ROOT="$ROOT" BK="$BK" "$BK/tools/conf-get.sh" "$DID" SOURCE_DATE_EPOCH)
   if [ -n "$_conf_epoch" ]; then
     SOURCE_DATE_EPOCH="$_conf_epoch"
     log "[$DID/$TIER] SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH（conf 显式钉的）"

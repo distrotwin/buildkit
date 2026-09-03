@@ -14,6 +14,12 @@ ROOT="${ROOT:-$PWD}"
 DID=${1:?用法: conf-get.sh <did> <VAR>...}; shift
 [ -f "$ROOT/distros/$DID.conf" ] || { echo "!! 没有 $ROOT/distros/$DID.conf" >&2; exit 2; }
 . "$ROOT/distros/$DID.conf"
+# ⚠️ 取值是 ${VAR:-}，所以**环境里的同名变量会被当成 conf 里的值**。
+# 想问「conf 到底有没有设这一项」时，调用方必须先把它从环境里剥掉：
+#   env -u SOURCE_DATE_EPOCH ... conf-get.sh <did> SOURCE_DATE_EPOCH
+# 不剥的话判断永远为真。实测踩过：build.sh 开头 export 了 derive_epoch 的兜底
+# 常量，于是「conf 显式钉了 epoch 吗」恒为是，为防假锚点写的拦截形同不存在
+# —— 探针继承了它要测量的东西。
 for v in "$@"; do
   # 未定义的键输出空行而不是报错：调用方常用它判断「有没有配这一项」
   printf '%s\n' "$(eval "printf '%s' \"\${$v:-}\"")"

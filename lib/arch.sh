@@ -38,7 +38,26 @@ arch_to_loader() {
   esac
 }
 
+# rpm 系的架构名。注意一个陷阱：deb 世界用名字区分 LoongArch 的两个世界
+# （loongarch64=旧、loong64=新），而**rpm 世界两个世界都叫 loongarch64**，
+# 名字不携带世代信息。所以世代判定必须落在 EXPECT_LOADER 上而不是架构名上
+# —— 麒麟信安 V6 的 loong 是新世界（实测其 glibc 的解释器为
+# /lib64/ld-linux-loongarch-lp64d.so.1、符号版本 GLIBCXX 对应 GLIBC_2.36），
+# 因此在本套体系里写作 ARCH=loong64，而它的 rpm 架构名是 loongarch64。
+arch_to_rpm() {
+  case "$1" in
+    amd64)               echo x86_64 ;;
+    arm64)               echo aarch64 ;;
+    loong64|loongarch64) echo loongarch64 ;;
+    i386)                echo i686 ;;
+    armhf)               echo armv7hl ;;
+    mips64el)            echo mips64el ;;
+    *) return 1 ;;
+  esac
+}
+
 MULTIARCH="${MULTIARCH:-$(arch_to_multiarch "$ARCH")}" || {
   printf '致命: 未知架构 %s，请先在 lib/arch.sh 的映射表里登记\n' "$ARCH" >&2; exit 1; }
 EXPECT_LOADER="${EXPECT_LOADER:-$(arch_to_loader "$ARCH" || echo '')}"
-export ARCH MULTIARCH EXPECT_LOADER
+RPMARCH="${RPMARCH:-$(arch_to_rpm "$ARCH" || echo '')}"
+export ARCH MULTIARCH EXPECT_LOADER RPMARCH

@@ -127,6 +127,19 @@ def main():
         print(f"数据库后端：{BACKEND}（取自 distros/*.conf 的 RPM_DB_BACKEND）")
     # rpm 的数据库要先初始化，否则 --root 安装会报 no dbpath
     subprocess.run(["rpm", *DEF, "--root", os.path.abspath(dst), "--initdb"], check=True)
+    # initdb 之后立刻核对真的建出了数据库文件。理由是踩过的一个静默失效：给
+    # rpm 4.20 指定 --define "_db_backend bdb" 时它接受参数、退出码 0、一个文件都不建
+    # （4.19 起去掉了 bdb 写支持，却不报错）。不在这里拦的话后面每一步都"成功"，
+    # 直到最后 rpm -qa 读出 0 个包 —— 那个症状与「空镜像」不可区分，而真因隔着
+    # 一百多个包的安装日志。
+    _dbdir = os.path.join(os.path.abspath(dst), "var/lib/rpm")
+    _dbfiles = sorted(f for f in os.listdir(_dbdir)) if os.path.isdir(_dbdir) else []
+    _dbfiles = [f for f in _dbfiles if not f.startswith(".")]
+    if not _dbfiles:
+        sys.exit("initdb 之后 %s 里没有任何数据库文件（后端 %s）。"
+                 "宿主 rpm 可能不支持写这个后端——它会接受参数并返回 0，但什么都不建。"
+                 % (_dbdir, BACKEND or "默认"))
+    print("  数据库已建：%s" % " ".join(_dbfiles))
     # 分两批：先 filesystem 等建骨架，再装其余。一次性 -Uvh 全量会让 rpm 自己决定顺序，
     # 而它的排序不保证 filesystem 在前（实测就是这么失败的）。
     head = [f for f in files if os.path.basename(f).split("-")[0] in FIRST]
@@ -145,6 +158,44 @@ def main():
             print("   ", ln)
         if p.returncode != 0:
             sys.exit(f"!! rpm 安装{label}失败 rc={p.returncode}")
+
+    # ── 用目标自己的 rpm 重建数据库 ─────────────────────────────────────────────
+    # 有些版本的目标 rpm 与宿主 rpm 在数据库格式上**没有交集**：麒麟信安 V3.4-4A
+    # 自带 rpm 4.15.1，只支持 bdb（给它 ndb 或 sqlite 都建出 0 个文件）；而 builder
+    # 的 rpm 4.20 自 4.19 起去掉了 bdb 写支持，指定 bdb 会接受参数、返回 0、什么都不建。
+    # 两端谈不成，只能让目标自己写：文件已经由宿主 rpm 落到位，这里把包登记重做一遍。
+    #
+    # 跨架构时这一步和下面的 ldconfig / update-ca-trust 一样靠 binfmt 进 chroot 执行。
+    if os.environ.get("RPM_DB_VIA_TARGET", "").strip() == "yes":
+        trpm = os.path.join(dst, "usr/bin/rpm")
+        if not os.path.exists(trpm):
+            sys.exit("RPM_DB_VIA_TARGET=yes 但 rootfs 里没有 /usr/bin/rpm，无从重建")
+        print("用目标自己的 rpm 重建数据库（宿主与目标的后端没有交集）…")
+        shutil.rmtree(os.path.join(dst, "var/lib/rpm"), ignore_errors=True)
+        r = subprocess.run(["chroot", os.path.abspath(dst), "/usr/bin/rpm", "--initdb"],
+                           capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            sys.exit("目标 rpm --initdb 失败：%s" % (r.stderr or r.stdout).strip()[:200])
+        _td = os.path.join(dst, "tmp/.rpmreg")
+        os.makedirs(_td, exist_ok=True)
+        inner = []
+        for f in files:
+            shutil.copy2(f, _td)
+            inner.append("/tmp/.rpmreg/" + os.path.basename(f))
+        r = subprocess.run(["chroot", os.path.abspath(dst), "/usr/bin/rpm", "--justdb",
+                            "-Uvh", "--nodeps", "--noscripts", "--ignorearch",
+                            "--nosignature", *inner],
+                           capture_output=True, text=True, timeout=1800)
+        shutil.rmtree(_td, ignore_errors=True)
+        if r.returncode != 0:
+            sys.exit("目标 rpm --justdb 登记失败：%s"
+                     % (r.stderr or r.stdout).strip()[-300:])
+        _f = [x for x in sorted(os.listdir(os.path.join(dst, "var/lib/rpm")))
+              if not x.startswith(".")]
+        if not _f:
+            sys.exit("目标 rpm 重建后 var/lib/rpm 仍然是空的")
+        print("  目标侧数据库已建：%s" % " ".join(_f[:6]))
+
     # --noscripts 跳过了全部 %post，其中 ca-certificates 的那一支会调
     # `update-ca-trust extract` 生成 /etc/pki/ca-trust/extracted/。不补跑，
     # /etc/pki/tls/certs/ca-bundle.crt 就是个悬空符号链接，镜像里所有 TLS 握手都失败。

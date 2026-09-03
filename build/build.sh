@@ -325,7 +325,7 @@ build_rpmrepo() {
   local D="$ROOT/work/$DID-$TIER"
   rm -rf "$D"; mkdir -p "$D"
   log "[$DID/$TIER] 装包（复用 rpmmedia 的装法与断言）"
-  RPM_DB_BACKEND="${RPM_DB_BACKEND:-}" \
+  RPM_DB_BACKEND="${RPM_DB_BACKEND:-}" RPM_DB_VIA_TARGET="${RPM_DB_VIA_TARGET:-}" \
     python3 "$BK/tools/rpmmedia.py" "$MEDIA" "$D" "$seeds" || die "[$DID/$TIER] 装包失败"
   adapt_container "$D" "" "$DID"
   # 出厂源。deb 侧 micro 档不带源，rpm 侧对齐：micro 的种子里没有 dnf，

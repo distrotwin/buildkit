@@ -101,14 +101,30 @@ dpkg --configure -a >/dev/null 2>&1 || true
 # 自然取到最新版，但 libc6 / base-files / dpkg 来自阶段一，不升就停在发布树版本。
 if [ -n "${EXTRA_SUITES:-}" ]; then
   _before=$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum | cut -c1-12)
-  apt-get upgrade -y -qq --no-install-recommends -o Dpkg::Use-Pty=false 2>&1 | grep -iE '^E:|segmentation' | head -3
-  dpkg --configure -a >/dev/null 2>&1 || true
+  # 退出码不能被管道丢掉（同下面第 ③ 步的理由）。conffile 一律留旧的：厂商包里
+  # 有交互式 conffile，不指定就会挂在提示上直到 job 超时。
+  set +e
+  apt-get upgrade -y --no-install-recommends \
+    -o Dpkg::Use-Pty=false -o Dpkg::Options::=--force-confold \
+    > /tmp/upgrade.log 2>&1
+  _rc=$?
+  set -e
+  grep -iE '^E:|segmentation|dpkg: error' /tmp/upgrade.log | head -5 || true
   _after=$(dpkg-query -W -f='${Package} ${Version}\n' 2>/dev/null | sha256sum | cut -c1-12)
-  if [ "$_before" = "$_after" ]; then
-    say "  ⚠ 配了 EXTRA_SUITES 却没有任何包版本变化，更新源可能没生效"
-  else
-    say "  基础包已按更新源升级（${EXTRA_SUITES}）"
+  # 两种都要拦死。配了更新源却一个包没动，说明源没生效——那镜像会静默地
+  # 继续发陈旧的 ca-certificates，而这正是加这个配置要修的东西。
+  if [ "$_rc" != 0 ]; then
+    say "  ✗ apt-get upgrade 失败（rc=$_rc），尾部日志："
+    tail -30 /tmp/upgrade.log | sed 's/^/      /'
+    exit 1
   fi
+  if [ "$_before" = "$_after" ]; then
+    say "  ✗ 配了 EXTRA_SUITES=${EXTRA_SUITES} 却没有任何包版本变化，更新源没有生效"
+    say "    当前 sources.list："; sed 's/^/      /' /etc/apt/sources.list
+    exit 1
+  fi
+  say "  基础包已按更新源升级（${EXTRA_SUITES}）"
+  dpkg-query -W -f='${Package} ${Version}\n' | grep -E '^(libc6|ca-certificates|openssl|base-files) ' | sed 's/^/      /' || true
 fi
 
 # ③ 装档位包（逐包，规避大事务里的厂商 dpkg 缺陷）

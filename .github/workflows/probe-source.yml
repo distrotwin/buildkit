@@ -33,11 +33,17 @@ jobs:
           probe(){ timeout 150 curl -sI -H "User-Agent: $UA" -o /dev/null \
                      -w '%{http_code} %{size_download}B %{time_total}s' "$1" 2>&1 | tail -1; }
           URLS='${{ inputs.urls }}'
+          # HEAD 不通不等于文件不在：有的站点不支持 HEAD、或对大文件的 HEAD 挂住。
+          # 实测见过「不存在的路径 1 秒回 403，真文件 HEAD 挂 135 秒」这种，
+          # 只看 HEAD 会把「在」判成「不在」。所以再取一次前 64 字节。
+          rget(){ timeout 150 curl -s -H "User-Agent: $UA" -r 0-63 -o /tmp/seg.bin \
+                    -w '%{http_code} 取到%{size_download}B %{time_total}s' "$1" 2>&1 | tail -1; }
           for u in $URLS; do
-            printf '%-84s %s\n' "${u:0:82}" "$(probe "$u")"
-            # 同主机同目录下构造一个必然不存在的名字作对照
             ctl="${u%/*}/__no_such_file_9999.bin"
-            printf '  ↳ 阴性对照 %-70s %s\n' "${ctl:0:68}" "$(probe "$ctl")"
+            printf '%-80s HEAD %s\n' "${u:0:78}" "$(probe "$u")"
+            printf '%-80s RGET %s\n' "" "$(rget "$u")"
+            printf '  ↳对照 %-72s HEAD %s\n' "${ctl:0:70}" "$(probe "$ctl")"
+            printf '  ↳对照 %-72s RGET %s\n' "" "$(rget "$ctl")"
           done
 
       - name: 按 apt 源探测
@@ -51,7 +57,9 @@ jobs:
           for spec in $SPECS; do
             base="${spec%%|*}"; suite="${spec##*|}"
             echo "════ $base  suite=$suite"
-            rel=$(timeout 90 curl -sS -H "User-Agent: $UA" "${base%/}/dists/$suite/Release" 2>&1)
+            # 容忍超时：shell 是 bash -e，curl 超时返回 124 会让整步直接退出，
+            # 后面几个 suite 就再也探不到了（实测踩过，第一个 suite 一挂全没了）。
+            rel=$(timeout 150 curl -sS -H "User-Agent: $UA" "${base%/}/dists/$suite/Release" 2>&1 || echo "__FETCH_FAILED__")
             if ! printf '%s' "$rel" | grep -q '^Suite:'; then
               echo "  取不到 Release：$(printf '%s' "$rel" | head -c 200)"
               printf '  阴性对照（构造 suite）：'

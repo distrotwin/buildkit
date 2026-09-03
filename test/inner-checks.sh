@@ -167,8 +167,13 @@ else
   kv has_source "$( [ "$hs" = yes ] && echo Y || echo N)"
 fi
 if [ "$PKGSYS" = rpm ] && [ -n "$PKGMGR" ] && ls /etc/yum.repos.d/*.repo >/dev/null 2>&1; then
-  if T 180 $PKGMGR -y -q install nano >/dev/null 2>&1 && rpm -q nano >/dev/null 2>&1; then
-    T 120 $PKGMGR -y -q remove nano >/dev/null 2>&1
+  # 上限可覆盖，默认放宽到 900 秒。原来是 180，对「国内源 + 境外 runner」这个
+  # 组合太紧：麒麟信安的源在国内，GitHub runner 在美国，拉一个 15000 个包的
+  # 仓库元数据跨太平洋就要几分钟。实测 CI 上这一步整步耗时 189 秒而上限是 180，
+  # 于是 pkg_roundtrip 报 N —— 那读起来像「镜像装不上包」，而本地同一个镜像
+  # 装得上。这一项要问的是「能不能从配好的源装上包」，不是「能不能三分钟内装上」。
+  if T "${PKG_RT_TIMEOUT:-900}" $PKGMGR -y -q install nano >/dev/null 2>&1 && rpm -q nano >/dev/null 2>&1; then
+    T "${PKG_RT_TIMEOUT_RM:-300}" $PKGMGR -y -q remove nano >/dev/null 2>&1
     command -v nano >/dev/null 2>&1 && kv pkg_roundtrip PARTIAL || kv pkg_roundtrip Y
   else kv pkg_roundtrip N; fi
 elif [ "$PKGSYS" = rpm ]; then kv pkg_roundtrip nosrc

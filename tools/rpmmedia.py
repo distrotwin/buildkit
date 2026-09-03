@@ -248,6 +248,52 @@ def main():
     # 报 error while loading shared libraries）。
     if os.path.exists(os.path.join(dst, "sbin/ldconfig")) or \
        os.path.exists(os.path.join(dst, "usr/sbin/ldconfig")):
+        # ── alternatives 管理的链接 ─────────────────────────────────────────────────
+        # rpm 的文件清单里会**声明** /usr/bin/ld 这类由 alternatives 管理的路径，但真正
+        # 建链接的是 %post 里的 `alternatives --install`。--noscripts 跳过它之后，
+        # 文件清单说有、文件系统里没有 —— 麒麟信安 V3.4 的 devel 档就这样编不了 C：
+        #   collect2: fatal error: cannot find 'ld'
+        # 而 binutils 明明装着、ld.bfd 与 ld.gold 都在。
+        #
+        # 只从 scriptlet 里抽出 `alternatives --install` 那几条来执行，不跑厂商的任意
+        # 脚本：实测全部已装包里只有 3 条，可控且可审计。切片路径靠
+        # tools/restore-alternatives.py 从源 rootfs 抄，这条路没有源 rootfs，只能重放。
+        _alt = None
+        for _c in ("usr/sbin/alternatives", "usr/sbin/update-alternatives",
+                   "usr/bin/alternatives", "usr/bin/update-alternatives"):
+            if os.path.exists(os.path.join(dst, _c)):
+                _alt = "/" + _c
+                break
+        if _alt and os.path.exists(os.path.join(dst, "usr/bin/rpm")):
+            _q = subprocess.run(["chroot", os.path.abspath(dst), "/usr/bin/rpm", "-qa",
+                                 "--qf", "%{NAME}\n"], capture_output=True, text=True, timeout=300)
+            _names = [x.strip() for x in _q.stdout.splitlines() if x.strip()]
+            _s = subprocess.run(["chroot", os.path.abspath(dst), "/usr/bin/rpm", "-q",
+                                 "--scripts", *_names], capture_output=True, text=True, timeout=600)
+            # 行尾续行要先拼起来，否则 --install 的参数（链接、名字、目标、优先级）会被截断
+            _joined = _s.stdout.replace("\\\n", " ")
+            _cmds, _links = [], []
+            for _ln in _joined.splitlines():
+                _ln = _ln.strip()
+                if re.search(r"\b(update-)?alternatives\s+--install\s", _ln):
+                    _cmds.append(_ln)
+                    _m = re.search(r"--install\s+(\S+)", _ln)
+                    if _m:
+                        _links.append(_m.group(1))
+            if _cmds:
+                print("重放 %d 条 alternatives --install（--noscripts 跳过的 %%post）…" % len(_cmds))
+                for _cmd in _cmds:
+                    subprocess.run(["chroot", os.path.abspath(dst), "/bin/sh", "-c", _cmd],
+                                   capture_output=True, text=True, timeout=120)
+                # 判据挂在结果上：链接必须真的出现。只统计"跑了几条"没有意义 ——
+                # alternatives 在缺少某个候选时会静默不建。
+                _miss = [l for l in sorted(set(_links))
+                         if not os.path.lexists(os.path.join(dst, l.lstrip("/")))]
+                if _miss:
+                    sys.exit("alternatives 重放后这些链接仍不存在：%s" % ", ".join(_miss))
+                print("    alternatives 链接就绪：%s" % " ".join(sorted(set(_links))))
+
+
         # 与 update-ca-trust 同因：crypto-policies 的 %post 会把
         # /usr/share/crypto-policies/<策略>/ 里的模板展开到 /etc/crypto-policies/back-ends/。
         # --noscripts 跳过它之后那个目录是空的，于是 /etc/krb5.conf.d/crypto-policies

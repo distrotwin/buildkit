@@ -116,6 +116,8 @@ b=$(basename "$f"); [ "${b%%-*}" = "$D" ]
 
 **`EXPECT_*` 宁可填推导值也不要留空。** 留空会因「期望空 == 实际空」被判通过，等于这一项验收不存在。填错会让门禁当场报错，那是好事。
 
+**ISO 路径要显式钉 `SOURCE_DATE_EPOCH`。** 在线源那几条路径可以从 `Release` 的 `Date` 推导，切片没有源可推，`derive_epoch` 会退回一个常量——那是个假锚点，看起来有值而已。正确的值在 squashfs 超级块里（magic `hsqs` 之后的 `mkfs_time`），用 `iso9660.py` 读盘内 16 字节就能取到，而且**同版本不同架构要各钉各的**，实测同一天压制的两张盘能差几分钟。
+
 **开了 multiarch 的系统，切片要挑对架构。** 国产桌面 OS 常带 i386 兼容层，`status` 里同名包有多条记录。按裸包名索引会让后解析的覆盖先解析的，于是 `libc6` 可能变成 `libc6:i386`，切片搬进 i386 的 `ld-2.28.so` 而漏掉 64 位的整套 glibc。症状离真因隔三步：镜像报 `exec /bin/bash: no such file or directory`，看着像 bash 没进去，实际是它的 ELF 解释器缺失；而 `ldconfig` 是 static-pie，唯独它还能跑，更容易把人带偏。`slice.py` 现在按 admindir 的 `arch` 首行挑本机架构，并对 `libc6` 做早失败断言。
 
 **同一版本不同架构的表现差异是突破口，不是噪声。** 上面那个缺陷只在 amd64 出现，arm64 正常——因为 arm64 的解释器在 `/lib/ld-linux-aarch64.so.1`，而 `lib -> usr/lib` 那个软链在。定位时先问「另一个架构为什么没事」，往往比继续读同一份日志快。

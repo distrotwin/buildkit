@@ -30,9 +30,10 @@ jobs:
         run: |
           set -u
           UA='Mozilla/5.0 (X11; Linux x86_64) Chrome/120'
-          probe(){ timeout 60 curl -sI -H "User-Agent: $UA" -o /dev/null \
-                     -w '%{http_code} len=%header{content-length}' "$1" 2>&1 | tail -1; }
-          for u in ${{ inputs.urls }}; do
+          probe(){ timeout 150 curl -sI -H "User-Agent: $UA" -o /dev/null \
+                     -w '%{http_code} %{size_download}B %{time_total}s' "$1" 2>&1 | tail -1; }
+          URLS='${{ inputs.urls }}'
+          for u in $URLS; do
             printf '%-84s %s\n' "${u:0:82}" "$(probe "$u")"
             # 同主机同目录下构造一个必然不存在的名字作对照
             ctl="${u%/*}/__no_such_file_9999.bin"
@@ -44,14 +45,17 @@ jobs:
         run: |
           set -u
           UA='Mozilla/5.0 (X11; Linux x86_64) Chrome/120'
-          for spec in ${{ inputs.apt-repos }}; do
+          # 先赋给变量再展开：输入里的 | 若直接写进 for 列表会被 bash 当成管道，
+          # 报 syntax error near unexpected token `|`（实测踩过）。
+          SPECS='${{ inputs.apt-repos }}'
+          for spec in $SPECS; do
             base="${spec%%|*}"; suite="${spec##*|}"
             echo "════ $base  suite=$suite"
             rel=$(timeout 90 curl -sS -H "User-Agent: $UA" "${base%/}/dists/$suite/Release" 2>&1)
             if ! printf '%s' "$rel" | grep -q '^Suite:'; then
               echo "  取不到 Release：$(printf '%s' "$rel" | head -c 200)"
               printf '  阴性对照（构造 suite）：'
-              timeout 60 curl -sI -o /dev/null -w '%{http_code}\n' "${base%/}/dists/__nosuch9999/Release" 2>&1|tail -1
+              timeout 150 curl -sI -o /dev/null -w '%{http_code}\n' "${base%/}/dists/__nosuch9999/Release" 2>&1|tail -1
               continue
             fi
             printf '%s' "$rel" | grep -E '^(Origin|Label|Suite|Codename|Version|Date|Components|Architectures):' | sed 's/^/  /'

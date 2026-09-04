@@ -153,6 +153,24 @@ media = dict(l.split()[:2] for l in iso.cat(e).decode().splitlines() if l.split(
 
 对不齐是常态，重点是**知道差在哪、并在 README 里如实写明**：镜像等于公开归档的状态，不等于某张具体介质。想要完全一致只有切那张盘，那是另一条路径——`slice` 路径的镜像天生没有这道缝，因为它本来就是从介质里切出来的。
 
+### 单架构 + 无托管 runner 的形状
+
+龙芯 Loongnix 是第一个这种被试：全线只有 LoongArch，没有 amd64/arm64，而 GitHub 没有 LoongArch 托管 runner。于是 workflow 里没有架构矩阵，三个档位全靠 QEMU 用户态模拟，`runner: ubuntu-24.04` + `needs-qemu: true`。这不是特例处理，是这一类被试的正常形状：矩阵维度少一个，单 job 时间长一个数量级。
+
+**世代判据落在动态链接器上，不在架构名上。** LoongArch 有两套互不兼容的 ABI，而命名在两个包生态里不一致：deb 世界 `loong64` 是新世界、`loongarch64` 是旧世界，**rpm 世界两个世界都叫 `loongarch64`**。所以接一个 LoongArch 被试的第一件事是读它 `Release`／`repodata` 的架构字段**再**验解释器：`/lib64/ld-linux-loongarch-lp64d.so.1` 是新世界，`/lib64/ld.so.1` 是旧世界。
+
+**旧世界在托管 runner 上造不出来，这一条已两次实测。** 上游 QEMU 不实现旧世界那两个系统调用，症状是拿一个旧世界二进制直接跑就报 `Unknown syscall 80`（ENOSYS，表现为 `cannot stat shared object: Error 38`）。麒麟 V10 SP1 的 `loongarch64` 与 Loongnix 20 都是这样。**判据是执行结果，不是架构名或 glibc 版本**——五分钟就能测完：从源里拉 `bash` 与 `libc6` 的包，解开，用目标自己的解释器加 `--library-path` 跑一句 `echo`。接任何 LoongArch 被试都该先做这一步，别等建完一轮才发现。
+
+**没有低地板可比时，检查项要标「不适用」而不是「通过」。** `manylinux2014` 没有 LoongArch，而它最早的 glibc 已高于 2.17，所以「产物是否依赖过新符号」这一项在这个架构上无从比较。检查集按架构分支给出「不适用」，这会让报告的通过数比本地 `verify.sh` 的总数少（每个镜像少一条），对齐基线时要按报告的口径而不是本地总数。
+
+### deb 系再补三条
+
+**`gpgv` 要显式列进 base 档。** 出厂 `sources.list` 用 `signed-by=`，apt 验签要调 `gpgv`，而 Debian 里 `gnupg` 只 Recommends 它、不 Depends；构建时关了 recommends，于是镜像里没有 `gpgv`，`apt-get update` 报 `Internal error: Cannot find gpgv ... InRelease is not signed`。那句话读起来像「源没签名」，真因是镜像里缺验签工具。
+
+**本地源只在真的存在时才写进源列表。** `copy://$ROOT/localrepo/$DID` 服务的是 `REPACK_DEBS` / `STUB_PROVIDES`，两者都为空时 `mk-localrepo.sh` 压根不跑、目录也不存在，而无条件写那一行会让 apt 报 `Err:3 copy:/w/localrepo/<did> ./ Packages` 然后 `mmdebstrap` 整体失败。前三个被试都至少有一项非空，所以一直没暴露。
+
+**本地跑构建时代理变量要大小写四个都清。** 容器会从 docker daemon 的 proxy drop-in 继承设置（本机是 `10.3.32.34:17777`），而那个代理在容器里往往连不上。只清小写两个不够，症状是取 `InRelease` 五轮重试全失败、报错指向「软件源不可达」，而同一个地址在宿主上 200。CI runner 没有代理，所以这一条只在本地预演时踩到——而本地预演正是制度要求的第一步。
+
 ### rpm 系特有的坑
 
 第一次接 rpm 系（麒麟信安）时踩的，都不是这一家特有的。

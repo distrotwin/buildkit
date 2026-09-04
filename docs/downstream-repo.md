@@ -12,6 +12,31 @@
 | `templates/CLAUDE.md` | `CLAUDE.md`，再 `ln -sf CLAUDE.md AGENTS.md` |
 | `templates/gitignore` | `.gitignore` |
 
+## 前置之前：先确认 runner 拿得到材料
+
+材料齐不齐，和 CI 拿不拿得到，是两个独立的问题。厂商站点常常只对国内出口放行，本机能下不代表 hosted runner 能下 —— 这一条卡死过两个候选系统，都是在写完 conf、准备开工时才发现的，所以要提到最前面来。
+
+**判据只有一个：用 `probe-source.yml` 在 runner 上实测。** 本机结果不能替代，反过来也不行。探测清单里要放三样东西：目标 URL、同目录下一个必然不存在的路径（阴性对照）、以及同一厂商另一个域名（可达对照）。少了阴性对照，分不清「404 没有这个文件」与「一律超时/403 这台主机不给信号」；少了可达对照，分不清「这台主机不通」与「runner 到中国全断」。方德那次正是靠可达对照定的性：同一 runner 同一时刻，`www.nfschina.com` 1.7 秒 200、阴性对照 404，而 `updates.os.nfschina.com` 四个 URL 全部 135 秒超时。
+
+探小文件，不要探 ISO。回答「这台主机通不通」几百字节的 `md5sum.txt` 就够了，把 4.7 GB 的 ISO 塞进探测列表只会让一次探测跑满四十分钟。大文件的下载能力交给构建本身去验，那里有重试和续传，失败时的诊断也更具体。
+
+已探明的清单：
+
+| 站点 | 本机直连 | GitHub runner | 结论 |
+|---|---|---|---|
+| 麒麟信安 ISO 站 | 403 | 403 | 真文件与不存在的路径同样 403，不给存在性信号 |
+| 麒麟信安公开 rpm 源 | 200/404 分明 | 同左 | 可用，`kylinsec` 已上线 |
+| loongnix 源 | 200 | 200 | 可用，`loongnix` 已上线 |
+| 凝思 `www.linx-info.com` | 200 / 0.07 s | 000 / 135 s | **CI 不可行** |
+| 方德 `updates.os.nfschina.com` | 200 / 0.09 s | 000 / 135 s | **CI 不可行** |
+| 方德 `www.nfschina.com` | 200 | 200 / 1.7 s | 官网通，但上面没有包 |
+
+凝思与方德都不是「材料不全」，是「材料在 runner 够不着的地方」。凝思的下载目录开放可浏览、版本比研究记录里还多两个、本机那份 ISO 与官方 sha256 逐位一致；方德的更新服务器开着 autoindex，x86_64 有 9460 个包、aarch64 有 13869 个，repodata 完整。要接它们，只能换网络位置（自建国内 runner）或换取材方式，纯改 conf 无解。
+
+**本机探测前先把六个代理变量全剥干净。** 环境里同时存在 `http_proxy`/`https_proxy`/`all_proxy` 三组大小写共六个，只 unset 其中两个或四个，curl 照样走代理、照样超时，而那个超时看起来和「站点不可达」一模一样。这个错误制造过一个假结论：本机的自造失败与 runner 的真实超时被归成同一个原因，反而显得交叉验证过了。代码里剥代理要按后缀剥（`k.lower().endswith("_proxy")`），不要列举变量名。
+
+公共镜像站这条路对商业闭源国产 OS 不通：TUNA 的 182 个仓库里只有 `deepin` 与 `ubuntukylin`，USTC、NJU 同样没有方德、凝思、麒麟、UOS。不用再逐个猜路径。
+
 ## 前置：先去上游研究里取材
 
 新建仓库之前，`hansbug-research/cn-desktop-os-image-from-iso` 的 `report.md` 里应该已经有这个系统的实测结论。至少要拿到六样东西，缺哪样就先去补哪样，不要靠猜：
@@ -159,7 +184,7 @@ media = dict(l.split()[:2] for l in iso.cat(e).decode().splitlines() if l.split(
 
 **世代判据落在动态链接器上，不在架构名上。** LoongArch 有两套互不兼容的 ABI，而命名在两个包生态里不一致：deb 世界 `loong64` 是新世界、`loongarch64` 是旧世界，**rpm 世界两个世界都叫 `loongarch64`**。所以接一个 LoongArch 被试的第一件事是读它 `Release`／`repodata` 的架构字段**再**验解释器：`/lib64/ld-linux-loongarch-lp64d.so.1` 是新世界，`/lib64/ld.so.1` 是旧世界。
 
-**旧世界在托管 runner 上造不出来，这一条已两次实测。** 上游 QEMU 不实现旧世界那两个系统调用，症状是拿一个旧世界二进制直接跑就报 `Unknown syscall 80`（ENOSYS，表现为 `cannot stat shared object: Error 38`）。麒麟 V10 SP1 的 `loongarch64` 与 Loongnix 20 都是这样。**判据是执行结果，不是架构名或 glibc 版本**——五分钟就能测完：从源里拉 `bash` 与 `libc6` 的包，解开，用目标自己的解释器加 `--library-path` 跑一句 `echo`。接任何 LoongArch 被试都该先做这一步，别等建完一轮才发现。
+**旧世界在托管 runner 上造不出来，这一条已两次实测。** 上游 QEMU 不实现旧世界那两个系统调用，症状是拿一个旧世界二进制直接跑就报 `Unknown syscall 80`（ENOSYS，表现为 `cannot stat shared object: Error 38`）。麒麟 V10 SP1 的 `loongarch64`、Loongnix 20、方德 4.0 的 `LoongarchOS` 都是这样（方德那支 filelists 里 `/lib64/ld.so.1` 命中、`ld-linux-loongarch-*` 零命中，配 glibc 2.28 与 `.lns8` 包标记，不必再建一轮就能判死）。**判据是执行结果，不是架构名或 glibc 版本**——五分钟就能测完：从源里拉 `bash` 与 `libc6` 的包，解开，用目标自己的解释器加 `--library-path` 跑一句 `echo`。接任何 LoongArch 被试都该先做这一步，别等建完一轮才发现。
 
 **没有低地板可比时，检查项要标「不适用」而不是「通过」。** `manylinux2014` 没有 LoongArch，而它最早的 glibc 已高于 2.17，所以「产物是否依赖过新符号」这一项在这个架构上无从比较。检查集按架构分支给出「不适用」，这会让报告的通过数比本地 `verify.sh` 的总数少（每个镜像少一条），对齐基线时要按报告的口径而不是本地总数。
 
@@ -209,6 +234,9 @@ dpkg: unrecoverable fatal error, aborting:
 ### rpm 系特有的坑
 
 第一次接 rpm 系（麒麟信安）时踩的，都不是这一家特有的。
+
+**「包有签名」不等于「签名可验」，公钥拿不到就别声称验了签。** 方德的包 PGP、DSA、RSA 三个 signature tag 齐全，但签它的 key（x86_64 是 `9D46A40588FBDABE`，aarch64 与 loongarch64 是 `6AB01E082F1E26FE`）在任何能拿到的地方都没有：`nfs-release` 里带的两把对不上，专用的 `nfs-gpg-keys` 包里装的是 **Oracle OSS group 的公钥**和一把 uid 写着 `private OBS (key without passphrase)` 的 OBS 默认无口令 key，公开 keyserver 两家都 404，而厂商自己的 `Nfs-Base.repo` 就写着 `gpgcheck=0`、baseurl 还是 `ftp://`。遇到这种情况，能拿到的最强锚点是厂商发布的校验和清单（方德是 `sm3sum.txt`，12610 行），但那只防传输损坏、不防替换，性质与签名不是一回事，README 里不能混着写。
+
 
 **先探宿主可达性，再定取材路径。** 厂商放 ISO 的那台主机和放软件源的那台主机是两回事，可达性要分别验。麒麟信安的 `mirrorlists.kylinsec.com.cn` 对 GitHub runner **全量 403**，且真文件与不存在的路径同样 403（不给存在性信号）；而它的公开 rpm 源 `mirrorlist.kylinsec.com.cn:8888`（主机名单数、端口不同）200/404 分明、秒级可达。用 `probe-source.yml` 从 runner 那个网段探，别用本机的结论下判断——本机还可能因为继承了 `https_proxy` 而把请求送到境外出口，表现成一样的 403。
 

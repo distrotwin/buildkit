@@ -23,8 +23,11 @@ for p, u in NS.items():
 def curl(url, out=None, tries=4):
     """取一个 URL。代理必须显式剥掉：厂商站点常常只对国内出口放行，
     而继承来的 https_proxy 会把请求送到境外出口，表现为全量 403。"""
+    # 按后缀剥，不按名字列举：环境里同时存在 http_proxy/https_proxy/all_proxy
+    # 三组大小写共六个变量，漏掉任何一个 curl 都照样走代理。实测因为只列了
+    # 前四个，本机跑出过「厂商站不可达」的假结论。
     env = {k: v for k, v in os.environ.items()
-           if k not in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+           if not k.lower().endswith("_proxy")}
     cmd = ["curl", "-sS", "-L", "--connect-timeout", "15",
            "--speed-limit", "2048", "--speed-time", "60",
            "-H", "User-Agent: Mozilla/5.0 (X11; Linux x86_64)"]

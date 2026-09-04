@@ -18,7 +18,10 @@ export KEYRING
 # —— 信任根是**那一把特定的** key，不是「有签名」这件事。
 if [ -n "${KEYRING_KEY_FP:-}" ]; then
   [ -f "$KEYRING" ] || die "keyring 不存在: $KEYRING"
-  _fps=$(LC_ALL=C gpg --show-keys --with-colons "$KEYRING" 2>/dev/null | awk -F: '/^fpr/{print $10}')
+  # 转成空格分隔再匹配：keyring 里常有主密钥加子密钥（Loongnix 那份就是两条），
+  # gpg 逐行输出，而下面的 case 模式两侧要空格 —— 不转的话期望的指纹明明在里面
+  # 也匹配不上，报错还会把它打出来，读起来像"值一样却说不符"。
+  _fps=$(LC_ALL=C gpg --show-keys --with-colons "$KEYRING" 2>/dev/null | awk -F: '/^fpr/{print $10}' | tr '\n' ' ')
   case " $_fps " in
     *" ${KEYRING_KEY_FP} "*) log "keyring 指纹已核对: ${KEYRING_KEY_FP}" ;;
     *) die "keyring 指纹不符：期望 ${KEYRING_KEY_FP}，$KEYRING 里是 $(printf '%s' "$_fps" | tr '\n' ' ')" ;;

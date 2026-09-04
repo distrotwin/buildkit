@@ -62,7 +62,7 @@ jobs:
           echo "✓ 阴性对照成立（基线跑不起来）"
 
       - name: 换成钉住的 QEMU 10
-        run: buildkit/tools/ensure-qemu.sh loongarch64
+        run: tools/ensure-qemu.sh loongarch64
 
       - name: 结果判据 — 换版后必须真的跑起来
         run: |

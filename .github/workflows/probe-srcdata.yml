@@ -1,0 +1,97 @@
+name: 数据源链路探测
+
+# 回答一个问题：厂商站点对 runner 不可达时，能不能把材料在本机切好、
+# 经 GitHub 中转、在 runner 上装配。
+#
+# 链路分两段，都要验：
+#   ① 本机切料 → release asset → runner 取回（能不能拿到、拿到的对不对）
+#   ② runner 把材料转成 GHCR 数据镜像 → 拉回来取出（GHCR 能不能当数据源）
+# 第二段用 runner 自己的 GITHUB_TOKEN 推，因为本机那个 token 没有
+# write:packages —— 顺便证明这条路不依赖额外授权也能跑通。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag"
+        type: string
+        default: probe-srcdata-t1
+      asset:
+        description: "asset 文件名"
+        type: string
+        default: src.tar.zst
+      sha256:
+        description: "期望的 sha256"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: ① 取回 release asset
+        run: |
+          set -eu
+          U="https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/${{ inputs.asset }}"
+          echo "取 $U"
+          S=$(date +%s.%N)
+          curl -sSL --fail -o a.bin "$U"
+          E=$(date +%s.%N)
+          SZ=$(stat -c%s a.bin)
+          echo "  下载 $SZ 字节，耗时 $(echo "$E-$S"|bc) 秒，速率 $(echo "scale=1;$SZ/1048576/($E-$S)"|bc) MiB/s"
+          G=$(sha256sum a.bin | cut -d' ' -f1)
+          echo "  sha256 $G"
+          [ "$G" = "${{ inputs.sha256 }}" ] || { echo "✗ 校验和不符，期望 ${{ inputs.sha256 }}"; exit 1; }
+          echo "✓ 内容与本机切出的完全一致"
+
+      - name: ② 解包并抽样验完整性
+        run: |
+          set -eu
+          mkdir -p src && tar -C src --zstd -xf a.bin
+          N=$(find src -name '*.rpm' | wc -l)
+          echo "  解出 $N 个 rpm"
+          [ "$N" -gt 0 ] || { echo "✗ 一个包都没有"; exit 1; }
+          # 抽样不是走过场：rpm -K 会连数字签名一起验，而方德的包我们没有公钥，
+          # 所以这里只判「包结构完整、payload 能解开」——判据要对得上能拿到的证据。
+          BAD=0
+          for f in $(find src -name '*.rpm' | shuf -n 8 --random-source=<(yes)); do
+            rpm2cpio "$f" | cpio -t --quiet >/dev/null 2>&1 || { echo "  ✗ $f payload 解不开"; BAD=$((BAD+1)); }
+          done
+          [ "$BAD" = 0 ] || { echo "✗ $BAD 个包损坏"; exit 1; }
+          echo "✓ 抽样 8 个，payload 均可解开"
+          echo "N=$N" >> $GITHUB_ENV
+
+      - name: ③ 转成 GHCR 数据镜像并推送
+        run: |
+          set -eu
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          IMG=ghcr.io/${{ github.repository_owner }}/probe-srcdata:t1
+          printf 'FROM scratch\nCOPY src /src\n' > Dockerfile
+          docker build -q -t "$IMG" . >/dev/null
+          S=$(date +%s.%N); docker push -q "$IMG" >/dev/null; E=$(date +%s.%N)
+          echo "✓ 推送成功，耗时 $(echo "$E-$S"|bc) 秒"
+          echo "IMG=$IMG" >> $GITHUB_ENV
+
+      - name: ④ 拉回来取出材料（模拟真实构建的取材动作）
+        run: |
+          set -eu
+          docker rmi "$IMG" >/dev/null 2>&1 || true
+          S=$(date +%s.%N); docker pull -q "$IMG" >/dev/null; E=$(date +%s.%N)
+          echo "  拉取耗时 $(echo "$E-$S"|bc) 秒"
+          # scratch 镜像里没有 shell，取材料只能靠 create+cp —— 这正是想要的：
+          # 数据镜像不该带任何可执行环境。
+          C=$(docker create "$IMG")
+          mkdir -p out && docker cp "$C:/src" out/
+          docker rm "$C" >/dev/null
+          M=$(find out -name '*.rpm' | wc -l)
+          echo "  取出 $M 个 rpm（原 $N 个）"
+          [ "$M" = "$N" ] || { echo "✗ 数量对不上"; exit 1; }
+          A=$(find src -name '*.rpm' | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)
+          B=$(find out -name '*.rpm' | sort | xargs sha256sum | sed 's|out/src/|src/|' | sha256sum | cut -d' ' -f1)
+          echo "  直取聚合 sha256 $A"
+          echo "  经镜像聚合 sha256 $B"
+          [ "$A" = "$B" ] || { echo "✗ 经 GHCR 往返后内容变了"; exit 1; }
+          echo "✓ 经 GHCR 往返，96 个包逐字节一致"

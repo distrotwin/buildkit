@@ -70,8 +70,18 @@ build_mmdebstrap() {
   # 用字面换行拼，不要用 $(printf '...\n')：命令替换会吃掉尾部换行，三行源会被
   # 拼成一行，而 apt 只会把它当成一条不认识的源静默忽略。
   local SRC
-  SRC="deb [trusted=yes] copy://$ROOT/localrepo/$DID ./
-deb [signed-by=$KEYRING] $MIRROR $SUITE $COMPONENTS"
+  # 本地源只在**真的存在**时才写进去。它服务的是 REPACK_DEBS / STUB_PROVIDES
+  # （重打包的坏包与顶替内核态组件的假包），两者都为空时 mk-localrepo.sh 压根不跑、
+  # 目录也就不存在，而无条件写这一行会让 apt 报
+  #   Err:3 copy:/w/localrepo/<did> ./ Packages
+  # 然后 mmdebstrap 整体失败 —— 判据要挂在「目录里有没有 Packages」这个结果上，
+  # 不是挂在「这条路径一向都有」这个假设上。
+  SRC=""
+  if [ -s "$ROOT/localrepo/$DID/Packages" ] || [ -s "$ROOT/localrepo/$DID/Packages.gz" ]; then
+    SRC="deb [trusted=yes] copy://$ROOT/localrepo/$DID ./
+"
+  fi
+  SRC="${SRC}deb [signed-by=$KEYRING] $MIRROR $SUITE $COMPONENTS"
   for _es in ${EXTRA_SUITES:-}; do
     SRC="$SRC
 deb [signed-by=$KEYRING] $MIRROR $_es $COMPONENTS"

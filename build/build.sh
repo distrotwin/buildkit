@@ -47,6 +47,25 @@ EXC=(
 )
 
 build_mmdebstrap() {
+  # ── mmdebstrap 的可执行性预检 ─────────────────────────────────────────────
+  # 它用 `arch-test <arch>` 判目标架构能不能跑，而 arch-test 只认它
+  # /usr/libexec/arch-test/ 下有同名 helper 的架构。LoongArch 只有 loong64
+  # 那一份，**没有 loongarch64**，于是 `arch-test loongarch64` 回答的是
+  #   I don't know how to detect arch 'loongarch64', sorry.
+  # 它回答的不是「能不能执行」而是「我认不认识这个名字」。两次调用都失败后
+  # mmdebstrap 无条件报 `can neither be executed natively nor via qemu user
+  # emulation`，而那句话与 binfmt 配得对不对无关：配得完美它也不会去问。
+  #
+  # 所以只对这个架构关掉预检（mmdebstrap 文档明确支持 --skip=check/qemu）。
+  # 判据不是被删掉而是搬了家：可执行性由 tools/ensure-qemu.sh 与
+  # .github/workflows/probe-qemu-oldworld.yml 负责，后者更严 —— 带阴性对照、
+  # 真跑目标架构的二进制、并核对 binfmt 的两侧。
+  # 别的架构不关：它们的 helper 都在，这道预检是有效的。
+  local MMSKIP=""
+  case "$ARCH" in
+    loongarch64) MMSKIP=check/qemu ;;
+  esac
+  [ -z "$MMSKIP" ] || log "[$DID/$TIER] 关掉 mmdebstrap 的 $MMSKIP（arch-test 不认识 $ARCH）"
   local TIER=$1 variant inc
   case $TIER in
     micro) variant=essential; inc="$MICRO_INCLUDE" ;;
@@ -92,6 +111,7 @@ deb [signed-by=$KEYRING] $MIRROR $_es $COMPONENTS"
       "${INC_ARG[@]}" \
       "${HOOKS[@]}" "${EXC[@]}" \
       --skip=chroot/policy-rc.d \
+      ${MMSKIP:+--skip=$MMSKIP} \
       --aptopt='APT::Key::gpgvcommand "gpgv"' \
       --aptopt='Acquire::Retries "3"' \
       --aptopt='Acquire::http::Timeout "45"' \

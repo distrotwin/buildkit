@@ -77,10 +77,23 @@ jobs:
           fi
           docker build --progress=plain --build-arg http_proxy= --build-arg https_proxy= \
             -f buildkit/Dockerfile.builder -t dosbuild-cache:latest buildkit/
-          docker run -d --name dosb --privileged --init -v "$ROOT:/w" \
+          # 宿主装好的 QEMU 也挂进容器：mmdebstrap 在容器里跑，而容器有自己的
+          # /var/lib/binfmts 数据库，宿主注册好并不等于容器里 update-binfmts
+          # 查得到 —— 实测宿主侧两个 ✓ 而容器里的构建照样报
+          # "can neither be executed natively nor via qemu user emulation"。
+          # 挂进来之后容器里再跑一次 ensure-qemu.sh 就能复用二进制、只补建条目。
+          QMOUNT=""
+          [ -d /usr/local/lib/qemu-binfmt ] && QMOUNT="-v /usr/local/lib/qemu-binfmt:/usr/local/lib/qemu-binfmt:ro"
+          docker run -d --name dosb --privileged --init -v "$ROOT:/w" $QMOUNT \
             -e DEBIAN_FRONTEND=noninteractive -e http_proxy= -e https_proxy= \
             dosbuild-cache:latest sleep infinity
           docker exec dosb bash -c 'ls -d /w/distros /w/buildkit/lib'
+          # 容器里补建 binfmt 条目。判据是「两侧都满足」，所以宿主已装好时这一步
+          # 只会补 update-binfmts 那一侧，不会再下载。
+          if [ "${{ inputs.needs-qemu }}" = true ]; then
+            docker exec dosb bash -c 'ROOT=/w BK=/w/buildkit /w/buildkit/tools/ensure-qemu.sh "'"${{ inputs.arch }}"'"' \
+              || { echo "::error::容器内 binfmt 准备失败"; exit 1; }
+          fi
 
       # 把这一步的输入与环境原样打出来。出问题时最先要回答的是「当时是什么条件」，
       # 而那些条件散落在 matrix、conf、宿主三处，事后翻日志拼不齐。

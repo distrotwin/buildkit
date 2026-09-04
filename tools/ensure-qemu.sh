@@ -57,10 +57,36 @@ cur=""
   && cur=$("$interp" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 cur_major=${cur%%.*}
 echo "[ensure-qemu] 当前注册的 QEMU: ${cur:-未知}（需要 ≥ ${NEED_MAJOR}）"
-if [ -n "${cur_major:-}" ] && [ "${cur_major:-0}" -ge "$NEED_MAJOR" ] 2>/dev/null; then
-  echo "[ensure-qemu] 已满足，不改动"
+
+# 判据是**两侧都满足**，不是「二进制版本够」。
+#
+# 为什么：mmdebstrap 在 builder 容器里跑，而容器有自己的 /var/lib/binfmts
+# 数据库。宿主上注册好之后，内核那侧的执行是通的（F 标志持有解释器文件，跨
+# 容器有效），但容器里 `update-binfmts --display` 查不到这一项，于是 mmdebstrap
+# 报 `can neither be executed natively nor via qemu user emulation`——实测就是
+# 这么失败的：宿主侧日志明明是两个 ✓，容器里的构建照样挂。
+#
+# 所以「已满足」要求：解释器版本够 **且** update-binfmts 里有这一项且它指向
+# 够新的解释器。任一条不成立就重新装一遍（幂等）。
+ub_ok=no
+if [ "$HAVE_UB" = yes ]; then
+  ubv=$(update-binfmts --display "$BINFMT_NAME" 2>/dev/null | sed -n 's/^ *interpreter = //p' | head -1)
+  if [ -n "$ubv" ] && [ -x "$ubv" ]; then
+    uvv=$("$ubv" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    [ -n "$uvv" ] && [ "${uvv%%.*}" -ge "$NEED_MAJOR" ] 2>/dev/null && ub_ok=yes
+  fi
+  echo "[ensure-qemu] update-binfmts 侧: ${uvv:-无条目}（$ub_ok）"
+else
+  # 没有 update-binfmts 就无所谓「那一侧」，只看内核侧
+  ub_ok=yes
+fi
+if [ -n "${cur_major:-}" ] && [ "${cur_major:-0}" -ge "$NEED_MAJOR" ] 2>/dev/null && [ "$ub_ok" = yes ]; then
+  echo "[ensure-qemu] 两侧都已满足，不改动"
   exit 0
 fi
+
+# 已经装过合格的二进制就不必再下载一遍（容器里第二次调用会走到这里）
+if [ -x "$DST_PRECHECK/qemu-loongarch64" ] 2>/dev/null; then :; fi
 
 # ── 取那一个二进制 ─────────────────────────────────────────────────────────────
 # 允许用本地已有的 deb（离线复现与本地预演用）。给了 QEMU_DEB 就不下载，
@@ -69,10 +95,23 @@ DEB_URL="${QEMU_DEB_URL:-https://deb.debian.org/debian/pool/main/q/qemu/qemu-use
 DEB_SHA=6b6fea55551fbcc1eb30e146ad5abdfbb49f8fa8c5998016242126de4d7f80df
 BIN_SHA=f1519bf750428ffbcd36f2a83d7f73cb98fa7f92f93f4deced496e68d7e8cca7
 DST=/usr/local/lib/qemu-binfmt
+DST_PRECHECK=$DST
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-if [ -n "${QEMU_DEB:-}" ] && [ -s "${QEMU_DEB}" ]; then
+# 已装过合格的就直接复用，避免容器里再下一遍 68 MB
+have_ver=""
+[ -x "$DST/qemu-loongarch64" ] \
+  && have_ver=$("$DST/qemu-loongarch64" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+if [ -n "$have_ver" ] && [ "${have_ver%%.*}" -ge "$NEED_MAJOR" ] 2>/dev/null; then
+  echo "[ensure-qemu] 复用已装的 $DST/qemu-loongarch64（QEMU $have_ver）"
+  SKIP_FETCH=yes
+else
+  SKIP_FETCH=no
+fi
+if [ "$SKIP_FETCH" = yes ]; then
+  :
+elif [ -n "${QEMU_DEB:-}" ] && [ -s "${QEMU_DEB}" ]; then
   echo "[ensure-qemu] 用本地 deb: $QEMU_DEB"
   cp "$QEMU_DEB" "$TMP/q.deb"
 else
@@ -86,6 +125,7 @@ got=$(sha256sum "$TMP/q.deb" | cut -d' ' -f1)
 # 解包前先确认解压器在。deb 的 data.tar 可能是 .xz/.zst/.gz，缺了对应工具时
 # tar 报的是 `xz: Cannot exec: No such file or directory` 然后 exit 2，而脚本
 # 若不检查就会继续往下走、用上一次残留的注册项"成功"——那种假通过最难查。
+if [ "$SKIP_FETCH" != yes ]; then
 for t in ar tar file sha256sum; do
   command -v "$t" >/dev/null 2>&1 || { echo "[ensure-qemu] 缺少 $t"; exit 1; }
 done
@@ -107,6 +147,7 @@ file "$SRC" | grep -q 'static-pie' || { echo "[ensure-qemu] 这个二进制不�
 $SUDO mkdir -p "$DST"
 $SUDO install -m 0755 "$SRC" "$DST/qemu-loongarch64"
 echo "[ensure-qemu] 已装 $DST/qemu-loongarch64 ($("$DST/qemu-loongarch64" --version | head -1))"
+fi
 
 # 把 update-binfmts 指向的那个解释器**就地换掉**，而不是另注册一条：
 # 它的定义文件里写死了路径，另注册会让 update-binfmts 与 /proc 两处不一致，

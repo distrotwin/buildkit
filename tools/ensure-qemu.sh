@@ -130,9 +130,20 @@ MASK='\xff\xff\xff\xff\xff\xff\xff\xfc\x00\xff\xff\xff\xff\xff\xff\xff\xfe\xff\x
 if [ "$HAVE_UB" = yes ]; then
   # 走发行版工具重注册：F 标志让内核在注册时打开并持有解释器，所以换了文件
   # 必须 disable+enable 才生效，改软链或改文件内容都不够。
-  $SUDO update-binfmts --disable "$BINFMT_NAME" >/dev/null 2>&1 || true
-  $SUDO update-binfmts --enable "$BINFMT_NAME" >/dev/null 2>&1 \
-    || { echo "[ensure-qemu] update-binfmts --enable 失败"; exit 1; }
+  # 不要把 update-binfmts 的输出丢掉：它失败时那句话就是唯一的线索。
+  dout=$($SUDO update-binfmts --disable "$BINFMT_NAME" 2>&1) || true
+  [ -n "$dout" ] && printf '%s\n' "$dout" | sed 's/^/[ensure-qemu]   disable: /'
+  if ! eout=$($SUDO update-binfmts --enable "$BINFMT_NAME" 2>&1); then
+    printf '%s\n' "$eout" | sed 's/^/[ensure-qemu]   enable: /'
+    # 退一步：用 --import 重新读定义文件再启用。qemu-user-static 的定义在
+    # /usr/share/binfmts/<name>，--import 会按它重建数据库条目。
+    iout=$($SUDO update-binfmts --import "$BINFMT_NAME" 2>&1) || true
+    [ -n "$iout" ] && printf '%s\n' "$iout" | sed 's/^/[ensure-qemu]   import: /'
+    if ! eout2=$($SUDO update-binfmts --enable "$BINFMT_NAME" 2>&1); then
+      printf '%s\n' "$eout2" | sed 's/^/[ensure-qemu]   enable(2): /'
+      echo "[ensure-qemu] update-binfmts 启用失败"; exit 1
+    fi
+  fi
 else
   # 没有 update-binfmts 时退回直接写 /proc。注意这种注册 mmdebstrap 看不见，
   # 只适合手工验证，不适合跑构建。

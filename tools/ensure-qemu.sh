@@ -128,22 +128,27 @@ fi
 MAGIC='\x7f\x45\x4c\x46\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x02\x01'
 MASK='\xff\xff\xff\xff\xff\xff\xff\xfc\x00\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff'
 if [ "$HAVE_UB" = yes ]; then
-  # 走发行版工具重注册：F 标志让内核在注册时打开并持有解释器，所以换了文件
-  # 必须 disable+enable 才生效，改软链或改文件内容都不够。
-  # 不要把 update-binfmts 的输出丢掉：它失败时那句话就是唯一的线索。
-  dout=$($SUDO update-binfmts --disable "$BINFMT_NAME" 2>&1) || true
-  [ -n "$dout" ] && printf '%s\n' "$dout" | sed 's/^/[ensure-qemu]   disable: /'
-  if ! eout=$($SUDO update-binfmts --enable "$BINFMT_NAME" 2>&1); then
-    printf '%s\n' "$eout" | sed 's/^/[ensure-qemu]   enable: /'
-    # 退一步：用 --import 重新读定义文件再启用。qemu-user-static 的定义在
-    # /usr/share/binfmts/<name>，--import 会按它重建数据库条目。
-    iout=$($SUDO update-binfmts --import "$BINFMT_NAME" 2>&1) || true
-    [ -n "$iout" ] && printf '%s\n' "$iout" | sed 's/^/[ensure-qemu]   import: /'
-    if ! eout2=$($SUDO update-binfmts --enable "$BINFMT_NAME" 2>&1); then
-      printf '%s\n' "$eout2" | sed 's/^/[ensure-qemu]   enable(2): /'
-      echo "[ensure-qemu] update-binfmts 启用失败"; exit 1
-    fi
+  # Ubuntu 24.04 的 qemu-user-static **不给 loongarch64 提供 update-binfmts
+  # 定义文件**（/usr/share/binfmts/qemu-loongarch64 不存在），它只把这一项注册
+  # 进了 /proc。所以 --enable / --import 都无从下手：
+  #   update-binfmts: warning: qemu-loongarch64 not in database of installed binary formats
+  # 正确做法是用 --install 自己把这一项装进它的数据库。
+  #
+  # 装之前要先清掉 /proc 里那条已有注册，否则内核会以 File exists 拒绝，
+  # 而 update-binfmts 把它报成一句含糊的失败。
+  if [ -e "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" ]; then
+    echo -1 | $SUDO tee "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" >/dev/null 2>&1 || true
+    echo "[ensure-qemu] 已清掉 /proc 里原有的 $BINFMT_NAME"
   fi
+  dout=$($SUDO update-binfmts --remove "$BINFMT_NAME" "$DST/qemu-loongarch64" 2>&1) || true
+  iout=$($SUDO update-binfmts --install "$BINFMT_NAME" "$DST/qemu-loongarch64" \
+           --magic "$MAGIC" --mask "$MASK" --offset 0 \
+           --credentials yes --preserve yes --fix-binary yes 2>&1)
+  if [ $? -ne 0 ] || [ ! -e "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" ]; then
+    printf '%s\n' "$iout" | sed 's/^/[ensure-qemu]   install: /'
+    echo "[ensure-qemu] update-binfmts --install 失败"; exit 1
+  fi
+  echo "[ensure-qemu] 已通过 update-binfmts --install 注册"
 else
   # 没有 update-binfmts 时退回直接写 /proc。注意这种注册 mmdebstrap 看不见，
   # 只适合手工验证，不适合跑构建。

@@ -70,7 +70,16 @@ CT 120 "$R" 'dpkg --configure -a >/dev/null 2>&1; true'
 if [ "$TIER" = micro ]; then
   SRCLIST=""
 else
-  SRCLIST="deb [signed-by=/usr/share/keyrings/kylin-archive-keyring.gpg] $MIRROR $SUITE $COMPONENTS"
+  # signed-by 必须用**实际** keyring 的文件名：adapt_container 把 $KEYRING 按原名
+  # 拷进 /usr/share/keyrings/，写死 kylin 的名字会让别的 OS 的镜像指向一个不存在的
+  # 文件 —— 而症状要到用户在镜像里 apt update 时才出现，构建期一切正常。
+  _KRN=$(basename "${KEYRING:-kylin-archive-keyring.gpg}")
+  SRCLIST="deb [signed-by=/usr/share/keyrings/$_KRN] $MIRROR $SUITE $COMPONENTS"
+  # 更新源与基础 suite 同等对待（麒麟 V10 SP1 那条路已有先例）
+  for _es in ${EXTRA_SUITES:-}; do
+    SRCLIST="$SRCLIST
+deb [signed-by=/usr/share/keyrings/$_KRN] $MIRROR $_es $COMPONENTS"
+  done
 fi
 adapt_container "$R" "$SRCLIST" "$DID"
 slim_locales "$R"

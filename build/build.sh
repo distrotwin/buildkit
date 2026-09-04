@@ -9,6 +9,21 @@ set -eu
 ROOT="${ROOT:-/w}"; . "$BK/lib/common.sh"
 DID=${1:?用法: build.sh <distro-id> <tier...>}; shift
 . "$ROOT/distros/$DID.conf"
+
+# conf 里可以用 KEYRING_FILE 指定自己的 keyring（相对 ROOT）。common.sh 在 conf 之前
+# 被 source，那时 conf 的值还不可见，所以这里重解析一次。
+if [ -n "${KEYRING_FILE:-}" ]; then KEYRING="$ROOT/${KEYRING_FILE#/}"; fi
+export KEYRING
+# conf 声明了 KEYRING_KEY_FP 就核对。不核的话任何一把 key 都能让「验签通过」成立
+# —— 信任根是**那一把特定的** key，不是「有签名」这件事。
+if [ -n "${KEYRING_KEY_FP:-}" ]; then
+  [ -f "$KEYRING" ] || die "keyring 不存在: $KEYRING"
+  _fps=$(LC_ALL=C gpg --show-keys --with-colons "$KEYRING" 2>/dev/null | awk -F: '/^fpr/{print $10}')
+  case " $_fps " in
+    *" ${KEYRING_KEY_FP} "*) log "keyring 指纹已核对: ${KEYRING_KEY_FP}" ;;
+    *) die "keyring 指纹不符：期望 ${KEYRING_KEY_FP}，$KEYRING 里是 $(printf '%s' "$_fps" | tr '\n' ' ')" ;;
+  esac
+fi
 TIERS=${*:-micro base devel}
 umask 022
 # 可复现性：所有产物时间戳归一。默认取仓库 Release 的 Date（同一快照 -> 同一时间戳），
@@ -46,8 +61,19 @@ build_mmdebstrap() {
   # 实测过两件事：apt 按宿主路径解析（写 chroot 内路径即使 setup-hook 已把文件
   # 拷进去也报 NO_PUBKEY），以及 _apt 能读到深埋在用户目录下的 keyring
   # （/home/runner/... 与 /etc/apt/keyrings/ 两处都可读、两处都能构建成功）。
-  printf 'deb [trusted=yes] copy://%s/localrepo/%s ./\ndeb [signed-by=%s] %s %s %s\n' \
-      "$ROOT" "$DID" "$KEYRING" "$MIRROR" "$SUITE" "$COMPONENTS" | \
+  # 源列表先拼成变量再喂进去：除基础 suite 之外还可能有 EXTRA_SUITES（Loongnix 的
+  # loongnix-security 与 Debian 的 security 同性质）。原先是一条 printf 写死两行，
+  # 加更新源无处可放 —— 而 conf 里写了却没人读，就是静默失效。
+  # 用字面换行拼，不要用 $(printf '...\n')：命令替换会吃掉尾部换行，三行源会被
+  # 拼成一行，而 apt 只会把它当成一条不认识的源静默忽略。
+  local SRC
+  SRC="deb [trusted=yes] copy://$ROOT/localrepo/$DID ./
+deb [signed-by=$KEYRING] $MIRROR $SUITE $COMPONENTS"
+  for _es in ${EXTRA_SUITES:-}; do
+    SRC="$SRC
+deb [signed-by=$KEYRING] $MIRROR $_es $COMPONENTS"
+  done
+  printf '%s\n' "$SRC" | \
   DID=$DID TIER=$TIER ROOT=$ROOT SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" mmdebstrap \
       --mode=root --architectures=$ARCH --format=tar --variant="$variant" \
       "${INC_ARG[@]}" \

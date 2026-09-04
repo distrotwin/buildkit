@@ -5,7 +5,20 @@ ROOT="${ROOT:-/w}"
 # 这两个可以被调用方单独覆盖：selfhost 路径在**目标容器内**执行，仓库是挂载进去的，
 # 路径与构建容器不同，所以不能写死成 $ROOT 的子目录。
 ASSETS_DIR="${ASSETS_DIR:-$ROOT/assets}"
-KEYRING="${KEYRING:-$ROOT/keys/kylin-archive-keyring.gpg}"
+# keyring 路径。默认值曾写死成 kylin 的文件名，于是新接一个 OS 就必须把自己的
+# keyring 改成那个名字，或者在三处不同的地方各改一次 —— 违背「下游只需要 conf」。
+# 现在优先取 conf 的 KEYRING_FILE（相对 ROOT），其次找 keys/ 下唯一那份，
+# 最后才回落到历史默认值。真正的解析在 build.sh／build-selfhost.sh 里 source
+# 完 conf 之后重做一次，因为本文件在 conf 之前就被 source。
+_kr_default() {
+  local d="$ROOT/keys" n
+  if [ -d "$d" ]; then
+    n=$(ls "$d"/*.gpg 2>/dev/null | wc -l)
+    if [ "$n" = 1 ]; then ls "$d"/*.gpg; return; fi
+  fi
+  printf '%s' "$ROOT/keys/kylin-archive-keyring.gpg"
+}
+KEYRING="${KEYRING:-$(_kr_default)}"
 # 架构参数化（ARCH / MULTIARCH / EXPECT_LOADER）
 . "$(dirname "${BASH_SOURCE[0]}")/arch.sh"
 
@@ -61,8 +74,13 @@ verify_repo_signature() {
   if ! fetch_exact "$base/dists/$suite/InRelease" "$tmp/InRelease" 5; then
     rm -rf "$tmp"; die "取不到 $suite 的 InRelease（五轮重试均失败）"
   fi
-  if gpgv --keyring "$KEYRING" "$tmp/InRelease" 2>&1 | grep -q "Good signature"; then
-    local who; who=$(gpgv --keyring "$KEYRING" "$tmp/InRelease" 2>&1 | grep -o 'Good signature from.*' | head -1)
+  # 判据用 gpgv 的退出码，不用输出里的英文字面。gpgv 的提示是**本地化**的：
+  # 中文环境下它打的是「完好的签名」，grep "Good signature" 会把合法签名判成
+  # 失败 —— 假阴性，而且只在非英文 locale 下出现，CI（en_US）与 builder 容器（C）
+  # 都碰不到，正是那种「换个环境才炸」的判据。取签名者信息时钉 LC_ALL=C。
+  if LC_ALL=C gpgv --keyring "$KEYRING" "$tmp/InRelease" >/dev/null 2>&1; then
+    local who; who=$(LC_ALL=C gpgv --keyring "$KEYRING" "$tmp/InRelease" 2>&1 \
+             | grep -o 'Good signature from.*' | head -1)
     log "GPG 验签通过 [$suite] $who"
     rm -rf "$tmp"; return 0
   fi

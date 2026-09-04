@@ -85,8 +85,6 @@ if [ -n "${cur_major:-}" ] && [ "${cur_major:-0}" -ge "$NEED_MAJOR" ] 2>/dev/nul
   exit 0
 fi
 
-# 已经装过合格的二进制就不必再下载一遍（容器里第二次调用会走到这里）
-if [ -x "$DST_PRECHECK/qemu-loongarch64" ] 2>/dev/null; then :; fi
 
 # ── 取那一个二进制 ─────────────────────────────────────────────────────────────
 # 允许用本地已有的 deb（离线复现与本地预演用）。给了 QEMU_DEB 就不下载，
@@ -95,7 +93,6 @@ DEB_URL="${QEMU_DEB_URL:-https://deb.debian.org/debian/pool/main/q/qemu/qemu-use
 DEB_SHA=6b6fea55551fbcc1eb30e146ad5abdfbb49f8fa8c5998016242126de4d7f80df
 BIN_SHA=f1519bf750428ffbcd36f2a83d7f73cb98fa7f92f93f4deced496e68d7e8cca7
 DST=/usr/local/lib/qemu-binfmt
-DST_PRECHECK=$DST
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 

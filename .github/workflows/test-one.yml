@@ -63,6 +63,11 @@ jobs:
             exit 1
           fi
 
+          # 旧世界 LoongArch 要求 QEMU ≥ 9（发行版自带的 8.2.2 会报 Unknown syscall 80），
+          # 而 Ubuntu 24.04 没有够新的包。这一步按目标架构决定要不要换版，换的是钉住
+          # 校验和的那一个 static-pie 二进制，并在换完后核对注册项真的指向它。
+          buildkit/tools/ensure-qemu.sh "${{ inputs.arch }}"
+
       - name: 装载镜像
         run: |
           set -eu

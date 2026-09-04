@@ -1,0 +1,88 @@
+name: 探测 · registry 对某个平台名的支持
+
+# 接一个新架构之前要回答的问题：**registry 认不认这个平台字符串**。
+#
+# 为什么需要单独探：OCI 的 platform.architecture 用 Go 的 GOARCH 取值，而
+# LoongArch 的 GOARCH 只有 loong64 —— 新旧两个世界在 OCI 眼里是同一个平台，
+# 没有区分它们的标准取值。docker 本地接受任意字符串（实测 linux/loongarch64
+# 会被原样记录），但「本地接受」不等于「registry 正确承载」，而这件事
+# 决定旧世界镜像能不能发出去、发出去会不会污染 loong64 那个平台名。
+#
+# 本 workflow 推一个最小载荷、回读 manifest、随后删除那个 version。
+# 载荷内容无关紧要——被测的是平台字段的往返。
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "GHCR 包名（会用 zz-probe-* 临时 tag，跑完删除）"
+        type: string
+        required: true
+      platforms:
+        description: "空格分隔的平台，如 'linux/loong64 linux/loongarch64'"
+        type: string
+        default: "linux/loong64 linux/loongarch64"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 逐个平台推 → 回读 → 删除
+        run: |
+          set -u
+          REG=ghcr.io/${{ github.repository_owner }}/${{ inputs.image }}
+          OWNER=${{ github.repository_owner }}
+          tar -cf /tmp/tiny.tar --files-from /dev/null
+          rc=0
+          for p in ${{ inputs.platforms }}; do
+            safe=$(printf '%s' "$p" | tr '/' '-')
+            TAG="zz-probe-$safe"
+            echo "════ $p ════"
+            # 本地记录
+            docker import --platform "$p" -c "LABEL cn.internal.probe=$p" /tmp/tiny.tar "probe:$safe" >/dev/null 2>&1 \
+              || { echo "  ✗ docker import 拒绝了 $p"; rc=1; continue; }
+            got=$(docker image inspect "probe:$safe" --format '{{.Os}}/{{.Architecture}}{{if .Variant}}/{{.Variant}}{{end}}')
+            echo "  docker 本地记录: $got"
+            docker tag "probe:$safe" "$REG:$TAG"
+            if ! docker push "$REG:$TAG" >/tmp/push.log 2>&1; then
+              echo "  ✗ 推送被拒："; tail -3 /tmp/push.log | sed 's/^/      /'; rc=1; continue
+            fi
+            echo "  ✓ 推送成功"
+            # 回读：必须从 registry 读，不能读本地缓存
+            docker rmi -f "$REG:$TAG" "probe:$safe" >/dev/null 2>&1
+            insp=$(docker manifest inspect -v "$REG:$TAG" 2>&1) || {
+              echo "  ✗ 回读失败："; printf '%s\n' "$insp" | head -3 | sed 's/^/      /'; rc=1; continue; }
+            back=$(printf '%s' "$insp" | jq -r '(.Descriptor.platform // .OCIManifest.config // {}) | "\(.os // "?")/\(.architecture // "?")"' 2>/dev/null)
+            echo "  registry 回读平台: $back"
+            [ "$back" = "$p" ] && echo "  ✓ 平台字段往返一致" || echo "  ⚠ 往返不一致：推 $p 回读 $back"
+          done
+          echo "PROBE_RC=$rc" >> "$GITHUB_ENV"
+
+      - name: 删掉探测用的 version
+        if: always()
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          set -u
+          # 只删 tag 以 zz-probe- 开头的 version。判据挂在 tag 前缀上，
+          # 不按时间或"最后几个"删 —— 那种判据会在并发发布时删错东西。
+          gh api --paginate "/orgs/${{ github.repository_owner }}/packages/container/${{ inputs.image }}/versions" \
+            > /tmp/v.json 2>/dev/null || { echo "取不到 version 列表（包可能还不存在）"; exit 0; }
+          jq -r '.[] | select(.metadata.container.tags[]? | startswith("zz-probe-")) | "\(.id) \(.metadata.container.tags|join(","))"' /tmp/v.json \
+            | while read -r id tags; do
+                gh api -X DELETE "/orgs/${{ github.repository_owner }}/packages/container/${{ inputs.image }}/versions/$id" \
+                  >/dev/null 2>&1 && echo "  已删 $tags" || echo "  删除失败 $tags"
+              done
+
+      - name: 结论
+        run: |
+          [ "${PROBE_RC:-0}" = 0 ] || { echo "::error::有平台未通过探测"; exit 1; }
+          echo "全部平台探测通过"

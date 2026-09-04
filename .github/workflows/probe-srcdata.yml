@@ -83,7 +83,11 @@ jobs:
           echo "  拉取耗时 $(echo "$E-$S"|bc) 秒"
           # scratch 镜像里没有 shell，取材料只能靠 create+cp —— 这正是想要的：
           # 数据镜像不该带任何可执行环境。
-          C=$(docker create "$IMG")
+          #
+          # 但 scratch 没有 CMD/ENTRYPOINT，裸 docker create 会报
+          # 「no command specified」而不是「镜像有问题」。给一个永不执行的
+          # 命令参数即可 —— create 只建容器不跑它，这个参数纯粹是为了过校验。
+          C=$(docker create "$IMG" /nonexistent)
           mkdir -p out && docker cp "$C:/src" out/
           docker rm "$C" >/dev/null
           M=$(find out -name '*.rpm' | wc -l)

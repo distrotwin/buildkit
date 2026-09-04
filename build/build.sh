@@ -47,6 +47,13 @@ EXC=(
 )
 
 build_mmdebstrap() {
+  local TIER=$1 variant inc
+  case $TIER in
+    micro) variant=essential; inc="$MICRO_INCLUDE" ;;
+    base)  variant=apt;       inc="$BASE_INCLUDE" ;;
+    devel) variant=apt;       inc="$BASE_INCLUDE,$DEVEL_INCLUDE" ;;
+    *) die "未知档位 $TIER" ;;
+  esac
   # ── mmdebstrap 的可执行性预检 ─────────────────────────────────────────────
   # 它用 `arch-test <arch>` 判目标架构能不能跑，而 arch-test 只认它
   # /usr/libexec/arch-test/ 下有同名 helper 的架构。LoongArch 只有 loong64
@@ -66,13 +73,6 @@ build_mmdebstrap() {
     loongarch64) MMSKIP=check/qemu ;;
   esac
   [ -z "$MMSKIP" ] || log "[$DID/$TIER] 关掉 mmdebstrap 的 $MMSKIP（arch-test 不认识 $ARCH）"
-  local TIER=$1 variant inc
-  case $TIER in
-    micro) variant=essential; inc="$MICRO_INCLUDE" ;;
-    base)  variant=apt;       inc="$BASE_INCLUDE" ;;
-    devel) variant=apt;       inc="$BASE_INCLUDE,$DEVEL_INCLUDE" ;;
-    *) die "未知档位 $TIER" ;;
-  esac
   local -a INC_ARG=(); [ -n "$inc" ] && INC_ARG=(--include="$inc")
   local HOOKS=()
   [ "${USRMERGE:-no}" = yes ] && HOOKS+=(--hook-dir=/usr/share/mmdebstrap/hooks/merged-usr)

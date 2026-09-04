@@ -163,6 +163,41 @@ media = dict(l.split()[:2] for l in iso.cat(e).decode().splitlines() if l.split(
 
 **没有低地板可比时，检查项要标「不适用」而不是「通过」。** `manylinux2014` 没有 LoongArch，而它最早的 glibc 已高于 2.17，所以「产物是否依赖过新符号」这一项在这个架构上无从比较。检查集按架构分支给出「不适用」，这会让报告的通过数比本地 `verify.sh` 的总数少（每个镜像少一条），对齐基线时要按报告的口径而不是本地总数。
 
+### LoongArch 旧世界：别做，先看这一节
+
+**结论:上游 QEMU 造不出旧世界(`loongarch64`)的镜像,不要再花时间修 binfmt。** 这一节把 2026-09 那次逐层排查完整记下来,因为报错文案会把人一路引向错误的子系统,我在上面耗了七轮。
+
+前三层都是通的,能过并不代表能成:
+
+| 层 | 结论 | 花在这里的弯路 |
+|---|---|---|
+| 简单二进制能否执行 | **能**,QEMU ≥ 9。8.2.2 报 `Unknown syscall 80`,上游 9.x 补了 stat 那两个调用 | Ubuntu 24.04 只带 8.2.2、无 backports;Debian 13 的 `qemu-user` 里那个二进制是 **static-pie、零 glibc 依赖**,可直接搬到 runner 用 |
+| binfmt 能否配对 | **能**,但有两处陷阱 | Ubuntu 的 `qemu-user-static` **不给 loongarch64 提供 `update-binfmts` 定义文件**,`--enable`/`--import` 都无从下手,只能 `--install` 自己建条目;而 builder 容器有**独立的** `/var/lib/binfmts`,宿主注册好不等于容器里查得到 |
+| mmdebstrap 能否放行 | **能**,要显式关一道预检 | 它的判据是 `arch-test <arch>`,而 `arch-test` 只有 `loong64` 那一份 helper,对 `loongarch64` 回答 `I don't know how to detect arch 'loongarch64', sorry.`——**它回答的不是「能不能执行」而是「我认不认识这个名字」**,binfmt 配得完美它也不会去问。用官方的 `--skip=check/qemu` 绕过 |
+| **装包能否完成** | **不能** | 见下 |
+
+最后一层是硬墙。同一个 QEMU 10、同样的操作:
+
+```
+旧世界:  rt_sigaction(SIGQUIT, ...) = -1 errno=22 (Invalid argument)
+         rt_sigaction(SIGCHLD, ...) = -1 errno=22
+新世界:  rt_sigaction(SIGQUIT, ...) = 0
+```
+
+dpkg 在跑维护者脚本之前必须 `signal(SIGQUIT, SIG_IGN)`,拿到 EINVAL 就中止:
+
+```
+dpkg: unrecoverable fatal error, aborting:
+ unable to ignore signal Quit before running new libc6:loongarch64
+ package pre-installation script: Invalid argument
+```
+
+根因是旧世界内核有自己的 `sigaction` 结构体布局,与上游不同;上游 QEMU 补了 stat 那两个系统调用,没补信号那一套。要做旧世界镜像只有龙芯补丁版 QEMU 或真机两条路。
+
+**这一节最该记住的一条判据错误:「能执行」与「能装包」是两个命题。** 我拿旧世界的 `bash`／`busybox` 打出 `MACHTYPE` 就宣布可行,而 `busybox` 连 `trap "" QUIT; echo ok` 都打得出来——**只因为它不检查 `rt_sigaction` 的返回值**,dpkg 检查了。验一个新架构的可行性,第一步就该是**跑一次真实的 dpkg／rpm 装包**,而不是 `echo`。
+
+同理,`tools/ensure-qemu.sh` 与 `probe-qemu-oldworld.yml` 都留着——它们对「换 QEMU 版本」这件事本身是对的,将来上游补上信号支持就能直接用;`ensure-qemu.sh` 的架构表里把要求写成数据,新架构只加一行。
+
 ### deb 系再补三条
 
 **`gpgv` 要显式列进 base 档。** 出厂 `sources.list` 用 `signed-by=`，apt 验签要调 `gpgv`，而 Debian 里 `gnupg` 只 Recommends 它、不 Depends；构建时关了 recommends，于是镜像里没有 `gpgv`，`apt-get update` 报 `Internal error: Cannot find gpgv ... InRelease is not signed`。那句话读起来像「源没签名」，真因是镜像里缺验签工具。

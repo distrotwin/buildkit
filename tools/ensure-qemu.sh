@@ -35,11 +35,26 @@ case "$ARCH" in
   *) echo "[ensure-qemu] 还没为 $ARCH 登记 binfmt 名字"; exit 1 ;;
 esac
 
-cur=""
-if [ -e "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" ]; then
-  interp=$(sed -n 's/^interpreter //p' "/proc/sys/fs/binfmt_misc/$BINFMT_NAME")
-  [ -n "$interp" ] && cur=$("$interp" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+# 解释器路径要从 update-binfmts 问，而不是只看 /proc。
+# 关键理由：**mmdebstrap 的可执行性检查走 `update-binfmts --display`**，不看
+# /proc 也不做实际 exec。直接往 /proc/sys/fs/binfmt_misc/register 写的注册项
+# 它看不见，于是即使 chroot 里明明能跑，mmdebstrap 仍报
+#   E: <arch> can neither be executed natively nor via qemu user emulation
+# 那句话读起来像 binfmt 没配，实际是配在了它不看的地方。
+HAVE_UB=no
+command -v update-binfmts >/dev/null 2>&1 && HAVE_UB=yes
+
+interp=""
+if [ "$HAVE_UB" = yes ]; then
+  interp=$(update-binfmts --display "$BINFMT_NAME" 2>/dev/null \
+           | sed -n 's/^ *interpreter = //p' | head -1)
 fi
+if [ -z "$interp" ] && [ -e "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" ]; then
+  interp=$(sed -n 's/^interpreter //p' "/proc/sys/fs/binfmt_misc/$BINFMT_NAME")
+fi
+cur=""
+[ -n "$interp" ] && [ -x "$interp" ] \
+  && cur=$("$interp" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
 cur_major=${cur%%.*}
 echo "[ensure-qemu] 当前注册的 QEMU: ${cur:-未知}（需要 ≥ ${NEED_MAJOR}）"
 if [ -n "${cur_major:-}" ] && [ "${cur_major:-0}" -ge "$NEED_MAJOR" ] 2>/dev/null; then
@@ -68,8 +83,20 @@ fi
 got=$(sha256sum "$TMP/q.deb" | cut -d' ' -f1)
 [ "$got" = "$DEB_SHA" ] || { echo "[ensure-qemu] deb 校验不符：期望 $DEB_SHA 实得 $got"; exit 1; }
 
-(cd "$TMP" && ar x q.deb && tar xf data.tar.* ./usr/bin/qemu-loongarch64 2>/dev/null \
-   || tar xf data.tar.*)
+# 解包前先确认解压器在。deb 的 data.tar 可能是 .xz/.zst/.gz，缺了对应工具时
+# tar 报的是 `xz: Cannot exec: No such file or directory` 然后 exit 2，而脚本
+# 若不检查就会继续往下走、用上一次残留的注册项"成功"——那种假通过最难查。
+for t in ar tar file sha256sum; do
+  command -v "$t" >/dev/null 2>&1 || { echo "[ensure-qemu] 缺少 $t"; exit 1; }
+done
+(cd "$TMP" && ar t q.deb) | grep -q '^data\.tar' || { echo "[ensure-qemu] deb 里没有 data.tar"; exit 1; }
+DATA=$( (cd "$TMP" && ar t q.deb) | grep '^data\.tar' | head -1)
+case "$DATA" in
+  *.xz)  command -v xz  >/dev/null 2>&1 || { echo "[ensure-qemu] 需要 xz-utils 才能解开 $DATA"; exit 1; } ;;
+  *.zst) command -v zstd >/dev/null 2>&1 || { echo "[ensure-qemu] 需要 zstd 才能解开 $DATA"; exit 1; } ;;
+esac
+(cd "$TMP" && ar x q.deb && tar xf "$DATA") \
+  || { echo "[ensure-qemu] 解开 $DATA 失败"; exit 1; }
 SRC=$(find "$TMP" -name qemu-loongarch64 -type f | head -1)
 [ -n "$SRC" ] || { echo "[ensure-qemu] deb 里找不到 qemu-loongarch64"; exit 1; }
 got=$(sha256sum "$SRC" | cut -d' ' -f1)
@@ -81,6 +108,18 @@ $SUDO mkdir -p "$DST"
 $SUDO install -m 0755 "$SRC" "$DST/qemu-loongarch64"
 echo "[ensure-qemu] 已装 $DST/qemu-loongarch64 ($("$DST/qemu-loongarch64" --version | head -1))"
 
+# 把 update-binfmts 指向的那个解释器**就地换掉**，而不是另注册一条：
+# 它的定义文件里写死了路径，另注册会让 update-binfmts 与 /proc 两处不一致，
+# 而 mmdebstrap 只看前者。换之前备份，便于回退。
+if [ "$HAVE_UB" = yes ] && [ -n "$interp" ]; then
+  real=$(readlink -f "$interp" 2>/dev/null || printf '%s' "$interp")
+  if [ -e "$real" ]; then
+    $SUDO cp -a "$real" "$real.pre-ensure-qemu" 2>/dev/null || true
+    $SUDO install -m 0755 "$SRC" "$real"
+    echo "[ensure-qemu] 已就地替换 $real（原件存为 $real.pre-ensure-qemu）"
+  fi
+fi
+
 # ── 重注册 ────────────────────────────────────────────────────────────────────
 # 必须重注册而不是改软链：原注册项带 F 标志，内核在**注册时**就打开并持有解释器，
 # 之后改路径指向不生效。
@@ -88,19 +127,38 @@ echo "[ensure-qemu] 已装 $DST/qemu-loongarch64 ($("$DST/qemu-loongarch64" --ve
 # magic 含 NUL，shell 变量存不了，会被静默截断而 register 只报 Invalid argument。
 MAGIC='\x7f\x45\x4c\x46\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x02\x01'
 MASK='\xff\xff\xff\xff\xff\xff\xff\xfc\x00\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff'
-if [ -e "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" ]; then
-  echo -1 | $SUDO tee "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" >/dev/null
-  echo "[ensure-qemu] 已注销旧的 $BINFMT_NAME"
+if [ "$HAVE_UB" = yes ]; then
+  # 走发行版工具重注册：F 标志让内核在注册时打开并持有解释器，所以换了文件
+  # 必须 disable+enable 才生效，改软链或改文件内容都不够。
+  $SUDO update-binfmts --disable "$BINFMT_NAME" >/dev/null 2>&1 || true
+  $SUDO update-binfmts --enable "$BINFMT_NAME" >/dev/null 2>&1 \
+    || { echo "[ensure-qemu] update-binfmts --enable 失败"; exit 1; }
+else
+  # 没有 update-binfmts 时退回直接写 /proc。注意这种注册 mmdebstrap 看不见，
+  # 只适合手工验证，不适合跑构建。
+  echo "[ensure-qemu] ⚠ 没有 update-binfmts，退回直写 /proc（mmdebstrap 看不到这种注册）"
+  [ -e "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" ] \
+    && echo -1 | $SUDO tee "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" >/dev/null
+  echo ":$BINFMT_NAME:M::$MAGIC:$MASK:$DST/qemu-loongarch64:POCF" \
+    | $SUDO tee /proc/sys/fs/binfmt_misc/register >/dev/null
 fi
-echo ":$BINFMT_NAME:M::$MAGIC:$MASK:$DST/qemu-loongarch64:POCF" \
-  | $SUDO tee /proc/sys/fs/binfmt_misc/register >/dev/null
 [ -e "/proc/sys/fs/binfmt_misc/$BINFMT_NAME" ] || { echo "[ensure-qemu] 注册后条目不存在"; exit 1; }
 
 # 判据挂在结果上：注册项必须真的指向我们装的那个，且版本达标。
 now_interp=$(sed -n 's/^interpreter //p' "/proc/sys/fs/binfmt_misc/$BINFMT_NAME")
 now_ver=$("$now_interp" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-[ "$now_interp" = "$DST/qemu-loongarch64" ] \
-  || { echo "[ensure-qemu] 注册项指向 $now_interp，不是我们装的那个"; exit 1; }
+[ -n "$now_ver" ] || { echo "[ensure-qemu] 注册项 $now_interp 问不出版本"; exit 1; }
 [ "${now_ver%%.*}" -ge "$NEED_MAJOR" ] \
-  || { echo "[ensure-qemu] 注册后版本仍是 $now_ver"; exit 1; }
-echo "[ensure-qemu] ✓ $BINFMT_NAME 现指向 QEMU $now_ver"
+  || { echo "[ensure-qemu] 注册后版本仍是 $now_ver（要求 ≥ $NEED_MAJOR）"; exit 1; }
+# update-binfmts 那一侧也要达标 —— mmdebstrap 只看它。两处都核才算数。
+if [ "$HAVE_UB" = yes ]; then
+  ub=$(update-binfmts --display "$BINFMT_NAME" 2>/dev/null)
+  printf '%s' "$ub" | grep -q 'enabled' \
+    || { echo "[ensure-qemu] update-binfmts 里 $BINFMT_NAME 不是 enabled"; exit 1; }
+  ubi=$(printf '%s' "$ub" | sed -n 's/^ *interpreter = //p' | head -1)
+  ubv=$([ -x "$ubi" ] && "$ubi" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  [ "${ubv%%.*}" -ge "$NEED_MAJOR" ] 2>/dev/null \
+    || { echo "[ensure-qemu] update-binfmts 指向的 $ubi 版本是 ${ubv:-未知}"; exit 1; }
+  echo "[ensure-qemu] ✓ update-binfmts 侧也是 QEMU $ubv"
+fi
+echo "[ensure-qemu] ✓ $BINFMT_NAME 现指向 QEMU $now_ver（$now_interp）"

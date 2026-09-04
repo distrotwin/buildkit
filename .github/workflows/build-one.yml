@@ -48,7 +48,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             mmdebstrap debootstrap dpkg-dev gpgv xz-utils zstd file
           if [ "${{ inputs.needs-qemu }}" = true ]; then
-            sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+            sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support xz-utils binutils file
             echo "qemu-user-static: $(dpkg-query -W -f='${Version}' qemu-user-static)"
             echo "已注册的 binfmt 条目："; ls /proc/sys/fs/binfmt_misc/ | sed 's/^/  /'
             # 前置断言：目标架构的 binfmt 必须真的在。不断言的话，缺失会在

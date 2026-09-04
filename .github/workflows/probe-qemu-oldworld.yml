@@ -1,0 +1,88 @@
+name: 探测 · 旧世界 LoongArch 能否在 runner 上执行
+
+# 为什么单独探：接旧世界之前要回答「runner 能不能执行它」，而这件事有三层
+# 前提，任一层不成立都表现成同一句含糊的报错：
+#   1. QEMU 版本够不够（8.x 报 Unknown syscall 80，需要 ≥ 9）
+#   2. binfmt 注册在 update-binfmts 那一侧生效（mmdebstrap 只看它，不看 /proc）
+#   3. 目标二进制真的能跑起来
+# 一轮完整构建要几十分钟，而这三层在三分钟内就能判完。
+#
+# 纪律：先做**阴性对照** —— 换版之前旧世界必须是失败的。若基线就能跑，说明环境
+# 里已有别的 QEMU 在生效，这次探测什么也证明不了（本地实测踩过：带 F 标志的注册
+# 会跨容器存活，让阴性对照失效而结论看起来是成功）。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+
+      - name: 装 QEMU 与 binfmt（发行版自带版本）
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static binfmt-support xz-utils binutils file
+          echo "自带版本: $(qemu-loongarch64-static --version | head -1)"
+          update-binfmts --display qemu-loongarch64 | head -4
+
+      - name: 取一份真实的旧世界二进制（Loongnix 20 的 bash + libc6）
+        run: |
+          set -eu
+          B=https://pkg.loongnix.cn/loongnix/20
+          mkdir -p /tmp/ow && cd /tmp/ow
+          curl -fsSL --retry 3 "$B/dists/DaoXiangHu-stable/main/binary-loongarch64/Packages.gz" -o P.gz
+          for p in bash libc6 libtinfo6; do
+            f=$(zcat P.gz | awk -v P="$p" '/^Package: /{n=$2} /^Filename: /{if(n==P){print $2; exit}}')
+            [ -n "$f" ] || { echo "::error::源里找不到 $p"; exit 1; }
+            curl -fsSL --retry 3 "$B/$f" -o "$(basename "$f")"
+          done
+          mkdir -p root
+          for d in *.deb; do (cd root && ar x ../"$d" && tar xf data.tar.* && rm -f data.tar.* control.tar.* debian-binary); done
+          echo "解出 $(find root -type f | wc -l) 个文件"
+          file root/bin/bash | head -1
+          # 判据：必须真是旧世界，否则这次探测测的是别的东西
+          file root/bin/bash | grep -q 'interpreter /lib64/ld.so.1' \
+            || { echo "::error::这不是旧世界二进制（解释器不是 /lib64/ld.so.1）"; exit 1; }
+
+      - name: 阴性对照 — 换版前旧世界必须跑不起来
+        run: |
+          set -u
+          out=$(sudo chroot /tmp/ow/root /bin/bash -c 'echo BASELINE_RAN' 2>&1 || true)
+          printf '%s\n' "$out" | sed 's/^/  /'
+          if printf '%s' "$out" | grep -q BASELINE_RAN; then
+            echo "::error::基线下旧世界就能跑，说明已有够新的 QEMU 在生效——本次探测无法证明任何事"
+            exit 1
+          fi
+          echo "✓ 阴性对照成立（基线跑不起来）"
+
+      - name: 换成钉住的 QEMU 10
+        run: buildkit/tools/ensure-qemu.sh loongarch64
+
+      - name: 结果判据 — 换版后必须真的跑起来
+        run: |
+          set -eu
+          out=$(sudo chroot /tmp/ow/root /bin/bash -c 'echo OLDWORLD_OK; echo $MACHTYPE' 2>&1)
+          printf '%s\n' "$out" | sed 's/^/  /'
+          printf '%s' "$out" | grep -q OLDWORLD_OK || { echo "::error::换版后仍跑不起来"; exit 1; }
+          printf '%s' "$out" | grep -q 'loongarch64-unknown-linux-gnu' \
+            || { echo "::error::跑起来了但 MACHTYPE 不对，执行的可能不是目标架构产物"; exit 1; }
+          echo "✓ 旧世界可执行"
+
+      - name: mmdebstrap 的那一侧也要成立
+        run: |
+          set -eu
+          # mmdebstrap 用 update-binfmts --display 判可执行性，不看 /proc、也不做实际 exec。
+          # 两侧不一致时它会报「can neither be executed natively nor via qemu user
+          # emulation」，那句话读起来像 binfmt 没配，实际是配在了它不看的地方。
+          update-binfmts --display qemu-loongarch64 | head -4
+          I=$(update-binfmts --display qemu-loongarch64 | sed -n 's/^ *interpreter = //p' | head -1)
+          V=$("$I" --version | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "update-binfmts 侧的解释器 $I 版本 $V"
+          [ "${V%%.*}" -ge 9 ] || { echo "::error::update-binfmts 侧仍是 $V"; exit 1; }
+          echo "✓ 两侧一致"

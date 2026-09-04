@@ -48,7 +48,7 @@ jobs:
         run: |
           set -eu
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
+          sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support xz-utils binutils file
           echo "qemu-user-static: $(dpkg-query -W -f='${Version}' qemu-user-static)"
           case "${{ inputs.arch }}" in
             loong64|loongarch64) NEED=qemu-loongarch64 ;;

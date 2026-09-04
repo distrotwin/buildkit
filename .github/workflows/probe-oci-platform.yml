@@ -74,13 +74,32 @@ jobs:
           set -u
           # 只删 tag 以 zz-probe- 开头的 version。判据挂在 tag 前缀上，
           # 不按时间或"最后几个"删 —— 那种判据会在并发发布时删错东西。
+          #
+          # ⚠️ 公开包的**最后一个** version 删不掉，GitHub 会报
+          #   "Publicly visible package versions with more than 5000 downloads
+          #    cannot be deleted"
+          # 那句话是误导的（刚推的镜像没有 5000 次下载），真实规则是「最后一个
+          # version 只能连整个包一起删」。所以探一个**尚不存在**的包时，清理会留下
+          # 一个只含探测 tag 的空包；下面在只剩探测 version 时改删整个包。
+          # 已有真镜像的包不会走到那一支。
           gh api --paginate "/orgs/${{ github.repository_owner }}/packages/container/${{ inputs.image }}/versions" \
             > /tmp/v.json 2>/dev/null || { echo "取不到 version 列表（包可能还不存在）"; exit 0; }
           jq -r '.[] | select(.metadata.container.tags[]? | startswith("zz-probe-")) | "\(.id) \(.metadata.container.tags|join(","))"' /tmp/v.json \
             | while read -r id tags; do
-                gh api -X DELETE "/orgs/${{ github.repository_owner }}/packages/container/${{ inputs.image }}/versions/$id" \
-                  >/dev/null 2>&1 && echo "  已删 $tags" || echo "  删除失败 $tags"
+                if gh api -X DELETE "/orgs/${{ github.repository_owner }}/packages/container/${{ inputs.image }}/versions/$id" >/dev/null 2>&1; then
+                  echo "  已删 $tags"
+                else
+                  echo "  单删失败 $tags（可能是最后一个 version）"
+                fi
               done
+          # 收尾：若包里剩下的全是探测 tag，说明这个包本来就是探测建出来的，整个删掉。
+          left=$(gh api --paginate "/orgs/${{ github.repository_owner }}/packages/container/${{ inputs.image }}/versions" 2>/dev/null | jq 'length')
+          probes=$(gh api --paginate "/orgs/${{ github.repository_owner }}/packages/container/${{ inputs.image }}/versions" 2>/dev/null \
+                   | jq '[.[]|select(.metadata.container.tags[]?|startswith("zz-probe-"))]|length')
+          if [ "${left:-0}" -gt 0 ] && [ "${left:-0}" = "${probes:-0}" ]; then
+            gh api -X DELETE "/orgs/${{ github.repository_owner }}/packages/container/${{ inputs.image }}" >/dev/null 2>&1 \
+              && echo "  包里只剩探测 tag，已删除整个包" || echo "  整包删除失败，请手工清理"
+          fi
 
       - name: 结论
         run: |

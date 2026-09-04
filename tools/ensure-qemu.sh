@@ -96,67 +96,75 @@ DST=/usr/local/lib/qemu-binfmt
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# 已装过合格的就直接复用，避免容器里再下一遍 68 MB
+# ── 备好一个够新的解释器 ───────────────────────────────────────────────────────
+# 两条路：已装过合格的就复用（容器里第二次调用走这条，不必再下 68 MB），
+# 否则取 deb、两级校验、装到 $DST。整段写成一个 if/else 而不是层层守卫 ——
+# 之前是打补丁式地加 SKIP_FETCH，结果 deb 校验那两行留在了分支外面，复用时
+# 去校验一个不存在的文件，报「deb 校验不符 期望 ... 实得（空）」。
 have_ver=""
 [ -x "$DST/qemu-loongarch64" ] \
   && have_ver=$("$DST/qemu-loongarch64" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
 if [ -n "$have_ver" ] && [ "${have_ver%%.*}" -ge "$NEED_MAJOR" ] 2>/dev/null; then
   echo "[ensure-qemu] 复用已装的 $DST/qemu-loongarch64（QEMU $have_ver）"
-  SKIP_FETCH=yes
 else
-  SKIP_FETCH=no
-fi
-if [ "$SKIP_FETCH" = yes ]; then
-  :
-elif [ -n "${QEMU_DEB:-}" ] && [ -s "${QEMU_DEB}" ]; then
-  echo "[ensure-qemu] 用本地 deb: $QEMU_DEB"
-  cp "$QEMU_DEB" "$TMP/q.deb"
-else
-  echo "[ensure-qemu] 取 $DEB_URL"
-  curl -fsSL --retry 3 --connect-timeout 20 --speed-limit 4096 --speed-time 60 \
-    -o "$TMP/q.deb" "$DEB_URL"
-fi
-got=$(sha256sum "$TMP/q.deb" | cut -d' ' -f1)
-[ "$got" = "$DEB_SHA" ] || { echo "[ensure-qemu] deb 校验不符：期望 $DEB_SHA 实得 $got"; exit 1; }
+  for t in ar tar file sha256sum; do
+    command -v "$t" >/dev/null 2>&1 || { echo "[ensure-qemu] 缺少 $t"; exit 1; }
+  done
+  if [ -n "${QEMU_DEB:-}" ] && [ -s "${QEMU_DEB}" ]; then
+    echo "[ensure-qemu] 用本地 deb: $QEMU_DEB"
+    cp "$QEMU_DEB" "$TMP/q.deb"
+  else
+    echo "[ensure-qemu] 取 $DEB_URL"
+    curl -fsSL --retry 3 --connect-timeout 20 --speed-limit 4096 --speed-time 60 \
+      -o "$TMP/q.deb" "$DEB_URL" \
+      || { echo "[ensure-qemu] 下载失败"; exit 1; }
+  fi
+  got=$(sha256sum "$TMP/q.deb" | cut -d' ' -f1)
+  [ "$got" = "$DEB_SHA" ] \
+    || { echo "[ensure-qemu] deb 校验不符：期望 $DEB_SHA 实得 $got"; exit 1; }
 
-# 解包前先确认解压器在。deb 的 data.tar 可能是 .xz/.zst/.gz，缺了对应工具时
-# tar 报的是 `xz: Cannot exec: No such file or directory` 然后 exit 2，而脚本
-# 若不检查就会继续往下走、用上一次残留的注册项"成功"——那种假通过最难查。
-if [ "$SKIP_FETCH" != yes ]; then
-for t in ar tar file sha256sum; do
-  command -v "$t" >/dev/null 2>&1 || { echo "[ensure-qemu] 缺少 $t"; exit 1; }
-done
-(cd "$TMP" && ar t q.deb) | grep -q '^data\.tar' || { echo "[ensure-qemu] deb 里没有 data.tar"; exit 1; }
-DATA=$( (cd "$TMP" && ar t q.deb) | grep '^data\.tar' | head -1)
-case "$DATA" in
-  *.xz)  command -v xz  >/dev/null 2>&1 || { echo "[ensure-qemu] 需要 xz-utils 才能解开 $DATA"; exit 1; } ;;
-  *.zst) command -v zstd >/dev/null 2>&1 || { echo "[ensure-qemu] 需要 zstd 才能解开 $DATA"; exit 1; } ;;
-esac
-(cd "$TMP" && ar x q.deb && tar xf "$DATA") \
-  || { echo "[ensure-qemu] 解开 $DATA 失败"; exit 1; }
-SRC=$(find "$TMP" -name qemu-loongarch64 -type f | head -1)
-[ -n "$SRC" ] || { echo "[ensure-qemu] deb 里找不到 qemu-loongarch64"; exit 1; }
-got=$(sha256sum "$SRC" | cut -d' ' -f1)
-[ "$got" = "$BIN_SHA" ] || { echo "[ensure-qemu] 二进制校验不符：期望 $BIN_SHA 实得 $got"; exit 1; }
-# 必须是静态的，否则换到别的发行版上跑不起来（Debian 13 的动态版要 glibc 2.41）
-file "$SRC" | grep -q 'static-pie' || { echo "[ensure-qemu] 这个二进制不是 static-pie，换宿主会失效"; exit 1; }
+  # 解包前确认解压器在。缺了的话 tar 报 `xz: Cannot exec` 然后 exit 2，
+  # 而不检查就继续走下去会用上一次残留的注册项"成功" —— 那种假通过最难查。
+  DATA=$( (cd "$TMP" && ar t q.deb) | grep '^data\.tar' | head -1)
+  [ -n "$DATA" ] || { echo "[ensure-qemu] deb 里没有 data.tar"; exit 1; }
+  case "$DATA" in
+    *.xz)  command -v xz   >/dev/null 2>&1 || { echo "[ensure-qemu] 需要 xz-utils 才能解开 $DATA"; exit 1; } ;;
+    *.zst) command -v zstd >/dev/null 2>&1 || { echo "[ensure-qemu] 需要 zstd 才能解开 $DATA"; exit 1; } ;;
+  esac
+  (cd "$TMP" && ar x q.deb && tar xf "$DATA") \
+    || { echo "[ensure-qemu] 解开 $DATA 失败"; exit 1; }
 
-$SUDO mkdir -p "$DST"
-$SUDO install -m 0755 "$SRC" "$DST/qemu-loongarch64"
-echo "[ensure-qemu] 已装 $DST/qemu-loongarch64 ($("$DST/qemu-loongarch64" --version | head -1))"
-fi
+  SRC=$(find "$TMP" -name qemu-loongarch64 -type f | head -1)
+  [ -n "$SRC" ] || { echo "[ensure-qemu] deb 里找不到 qemu-loongarch64"; exit 1; }
+  got=$(sha256sum "$SRC" | cut -d' ' -f1)
+  [ "$got" = "$BIN_SHA" ] \
+    || { echo "[ensure-qemu] 二进制校验不符：期望 $BIN_SHA 实得 $got"; exit 1; }
+  # 必须是静态的，否则换到别的发行版上跑不起来（Debian 13 的动态版要 glibc 2.41）
+  file "$SRC" | grep -q 'static-pie' \
+    || { echo "[ensure-qemu] 这个二进制不是 static-pie，换宿主会失效"; exit 1; }
 
-# 把 update-binfmts 指向的那个解释器**就地换掉**，而不是另注册一条：
-# 它的定义文件里写死了路径，另注册会让 update-binfmts 与 /proc 两处不一致，
-# 而 mmdebstrap 只看前者。换之前备份，便于回退。
-if [ "$HAVE_UB" = yes ] && [ -n "$interp" ]; then
-  real=$(readlink -f "$interp" 2>/dev/null || printf '%s' "$interp")
-  if [ -e "$real" ]; then
-    $SUDO cp -a "$real" "$real.pre-ensure-qemu" 2>/dev/null || true
-    $SUDO install -m 0755 "$SRC" "$real"
-    echo "[ensure-qemu] 已就地替换 $real（原件存为 $real.pre-ensure-qemu）"
+  $SUDO mkdir -p "$DST"
+  $SUDO install -m 0755 "$SRC" "$DST/qemu-loongarch64"
+  echo "[ensure-qemu] 已装 $DST/qemu-loongarch64 ($("$DST/qemu-loongarch64" --version | head -1))"
+
+  # 把 update-binfmts 指向的那个解释器也就地换掉（它的定义文件里写死了路径）。
+  # 只在这一支做：复用时那个文件已经是新版了。
+  if [ "$HAVE_UB" = yes ] && [ -n "$interp" ]; then
+    real=$(readlink -f "$interp" 2>/dev/null || printf '%s' "$interp")
+    if [ -e "$real" ] && [ "$real" != "$DST/qemu-loongarch64" ]; then
+      $SUDO cp -a "$real" "$real.pre-ensure-qemu" 2>/dev/null || true
+      $SUDO install -m 0755 "$SRC" "$real"
+      echo "[ensure-qemu] 已就地替换 $real（原件存为 $real.pre-ensure-qemu）"
+    fi
   fi
 fi
+
+# 到这里 $DST/qemu-loongarch64 一定存在且够新 —— 判据挂在结果上。
+[ -x "$DST/qemu-loongarch64" ] || { echo "[ensure-qemu] $DST/qemu-loongarch64 不存在"; exit 1; }
+_v=$("$DST/qemu-loongarch64" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+[ -n "$_v" ] && [ "${_v%%.*}" -ge "$NEED_MAJOR" ] 2>/dev/null \
+  || { echo "[ensure-qemu] 备好的解释器版本是 ${_v:-未知}，不达标"; exit 1; }
 
 # ── 重注册 ────────────────────────────────────────────────────────────────────
 # 必须重注册而不是改软链：原注册项带 F 标志，内核在**注册时**就打开并持有解释器，

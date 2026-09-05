@@ -21,8 +21,16 @@ fi
 rm -rf "$DST"; mkdir -p "$(dirname "$DST")"
 docker pull -q "$IMG" >/dev/null
 C=$(docker create "$IMG" /nonexistent)   # scratch 无 CMD，必须给个永不执行的参数
-docker cp "$C:/src" "$DST"
+# 不用 docker cp：它在客户端按介质原样的权限位落盘，而 ISO 拷出的目录是 555，
+# 非 root 的 CLI 建完 555 目录就没法往里建子目录（mkdir permission denied）。
+# export + tar --no-same-permissions 按 umask 落盘，传输不依赖介质的权限位。
+_tmp=$(mktemp -d)
+docker export "$C" | tar -C "$_tmp" -x --no-same-owner --no-same-permissions src
 docker rm "$C" >/dev/null
+mv "$_tmp/src" "$DST"; rmdir "$_tmp"
+# 介质里的 555 目录落盘后连自己都删不掉（下次幂等重取的 rm -rf 会卡住）。
+# manifest 锚的是内容不是权限位，统一补上属主写权限无损完整性。
+chmod -R u+w "$DST"
 
 # 两道门禁，缺一不可：
 # ① manifest 文件本身与 conf 钉的指纹一致 —— 防整份 manifest 被换

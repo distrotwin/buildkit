@@ -15,6 +15,7 @@ on:
       tag-prefix: { type: string, required: true, description: "版本前缀，如 v11" }
       arches:     { type: string, required: true, description: "空格分隔" }
       latest:     { type: boolean, default: false, description: "该档位是否同时打成 latest" }
+      alias-prefixes: { type: string, default: "", description: "空格分隔的别名前缀：为本次推出的每个 tag 以同 digest 再建一份 <别名前缀> 版本（如 v6 之于 v6.0.100）。别名是同一镜像的另一个名字，不是再发一遍" }
 
 permissions:
   contents: read
@@ -274,6 +275,33 @@ jobs:
           # 不带档位后缀的 tag 指向 devel，与 golang:1.21 是完整版的惯例一致
           [ "$TIER" = devel ] && mk "$REG:$PFX"
           [ "${{ inputs.latest }}" = true ] && mk "$REG:latest"
+
+          # 别名前缀：同 digest 再挂一个名字（imagetools create 引用既有 manifest，
+          # 不重推层）。此前 v6 与 v6.0.100 是两条 publish 各做各的，溯源 label 里的
+          # version 不同导致 digest 不同——「本质上同一镜像」必须落在 digest 相等上，
+          # 挂完逐个断言。
+          for AP in ${{ inputs.alias-prefixes }}; do
+            for suf in "-$TIER" "-$TIER-$STAMP"; do
+              docker buildx imagetools create -t "$REG:$AP$suf" "$REG:$PFX$suf"
+              A=$(docker buildx imagetools inspect "$REG:$AP$suf" --format '{{.Manifest.Digest}}')
+              B=$(docker buildx imagetools inspect "$REG:$PFX$suf" --format '{{.Manifest.Digest}}')
+              [ "$A" = "$B" ] || { echo "::error::别名 $AP$suf 与 $PFX$suf 的 digest 不一致"; exit 1; }
+              echo "  ✔ 别名 $REG:$AP$suf（digest 同 $PFX$suf）"
+            done
+            # 每架构 tag 同样建别名
+            for r in $SRCS; do
+              base=${r##*:}
+              docker buildx imagetools create -t "$REG:$AP${base#$PFX}" "$r"
+              docker buildx imagetools create -t "$REG:$AP${base#$PFX}-$STAMP" "$REG:$base-$STAMP"
+            done
+            if [ "$TIER" = devel ]; then
+              docker buildx imagetools create -t "$REG:$AP" "$REG:$PFX"
+              A=$(docker buildx imagetools inspect "$REG:$AP" --format '{{.Manifest.Digest}}')
+              B=$(docker buildx imagetools inspect "$REG:$PFX" --format '{{.Manifest.Digest}}')
+              [ "$A" = "$B" ] || { echo "::error::裸别名 $AP 与 $PFX digest 不一致"; exit 1; }
+              echo "  ✔ 别名 $REG:$AP"
+            fi
+          done
 
           echo "── 校验 manifest list 的平台与成员 ──"
           # 各架构指向同一份 rootfs 时，manifest list 照样建得出来、CI 照样全绿。

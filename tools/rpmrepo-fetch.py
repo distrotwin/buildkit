@@ -325,10 +325,21 @@ def main():
             if not good:
                 bad.append("%s: %s" % (n, out.strip().replace("\n", " ")[:110]))
         if bad:
-            print("  验签失败 %d 个：" % len(bad))
+            # ISO 介质里厂商自己后加的包常常没签名（凝思 an7 的 linxos-release/
+            # linxos-gpg-keys/kernel-headers 就是），它们的完整性由 ISO 官方校验
+            # 和 + repodata 逐包 sha256 兜底。UNSIGNED_OK 按包名前缀逐个放行，
+            # 名单必须写进上层 .origin；名单外仍然一票否决。
+            allow = set(os.environ.get("UNSIGNED_OK", "").split())
+            def _pkgname(line):
+                base = line.split(":", 1)[0].strip()
+                base = os.path.basename(base)
+                return re.sub(r"-[^-]+-[^-]+\.[a-z0-9_]+\.rpm$", "", base)
+            hard = [b for b in bad if _pkgname(b) not in allow]
+            print("  验签失败 %d 个（白名单放行 %d 个）：" % (len(bad), len(bad) - len(hard)))
             for b in bad[:10]:
-                print("    " + b)
-            sys.exit("有 rpm 未通过厂商公钥验签，拒绝继续")
+                print("    %s%s" % (b, "" if b in hard else "（放行）"))
+            if hard:
+                sys.exit("有 rpm 未通过厂商公钥验签且不在 UNSIGNED_OK，拒绝继续")
         print("  %d 个 rpm 全部通过厂商公钥验签" % len(names))
     else:
         sys.exit("未提供 KEYFILE，拒绝在无信任根的情况下产出镜像")

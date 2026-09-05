@@ -70,7 +70,7 @@ fi
 # `debootstrap --exclude` 之后旧 stage 被直接复用 —— 改动完全没生效，日志里连
 # --exclude 那行都不打印（整个阶段 1 被跳过）。漏一个输入等于把「改了配置」
 # 静默降级成「什么都没改」，而且不报错，最容易让人去怀疑修法本身。
-STAGE_FP=$(printf '%s|%s|%s|%s|%s|%s|%s' "$MIRROR" "$SUITE" "${EXTRA_SUITES:-}" "$COMPONENTS" "${STAGE_INCLUDE:-}" "${PIN_NEVER:-}" "$KEYRING_FP" | sha256sum | cut -c1-16)
+STAGE_FP=$(printf '%s|%s|%s|%s|%s|%s|%s|%s|%s' "$MIRROR" "$SUITE" "${EXTRA_SUITES:-}" "$COMPONENTS" "${STAGE_INCLUDE:-}" "${PIN_NEVER:-}" "${STAGE1_TOUCH:-}" "${STAGE1_COPY:-}$(for _c in ${STAGE1_COPY:-}; do sha256sum "$ROOT_HOST/${_c%%:*}" 2>/dev/null | cut -c1-16; done)" "$KEYRING_FP" | sha256sum | cut -c1-16)
 # STAGE_FROM_TAR 时必须连阶段 1 一起跳过：新 job 里 work 目录不存在，
 # .foreign-done 指纹必然不匹配，debootstrap 会照跑一遍——传 tar 就白传了，
 # 而且不报错，只是慢二十来分钟，最容易被当成「拆分没带来收益」。
@@ -114,6 +114,15 @@ elif [ "$(cat "$ROOT_HOST/work/$DID-stage/.foreign-done" 2>/dev/null)" != "$STAG
       for _tf in ${STAGE1_TOUCH:-}; do
         mkdir -p $STAGE/\$(dirname \$_tf)
         : > $STAGE/\$_tf
+      done
+      # STAGE1_COPY="仓库内相对路径:目标绝对路径 ..."：有的厂商 maintainer script
+      # 需要的不只是文件存在，还得有正确内容（方德 panda 的 pam common-* 若为空
+      # 等于 deny-all，chfn 被 PAM 拒、adduser 挂、systemd postinst 死）。内容由
+      # 下游仓库 assets/ 提供，已并入 stage 缓存键。
+      for _cp in ${STAGE1_COPY:-}; do
+        _s=/w/\${_cp%%:*}; _d=\${_cp##*:}
+        mkdir -p \$STAGE/\$(dirname \$_d)
+        cp \$_s \$STAGE/\$_d
       done
     printf '%s' '$STAGE_FP' > $STAGE/.foreign-done
     du -sh $STAGE" || exit 1

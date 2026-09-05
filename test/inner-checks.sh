@@ -212,10 +212,19 @@ if has cc || has gcc; then
   kv compile_c "$( [ -x /tmp/_c ] && [ "$(/tmp/_c 2>/dev/null)" = cok ] && echo Y || echo N )"
 else kv compile_c n/a; fi
 if has g++; then
-  printf '#include <string>\n#include <cstdio>\n#include <thread>\nint main(){std::string s="xok";std::thread t([]{});t.join();printf("%%s\\n",s.c_str());return 0;}\n' > /tmp/_x.cpp
-  g++ -O2 -std=c++17 -pthread -o /tmp/_x /tmp/_x.cpp 2>/dev/null
+  # 探针按标准阶梯降级：写死 c++17+<thread> 会把 gcc 4.x 的被试（凝思 42/60/97）
+  # 全判失败 —— 那是在量探针自己的标准假设，不是被试的 C++ 能力。
+  # 判据是「该工具链能编译并运行其所属年代的 C++」，实际达到的标准记进 cxx_std。
+  printf '#include <string>\n#include <cstdio>\n#include <thread>\nint main(){std::string s="xok";std::thread t([]{});t.join();printf("%%s\\n",s.c_str());return 0;}\n' > /tmp/_x17.cpp
+  printf '#include <string>\n#include <cstdio>\nint main(){std::string s="xok";printf("%%s\\n",s.c_str());return 0;}\n' > /tmp/_x03.cpp
+  _std=none
+  if g++ -O2 -std=c++17 -pthread -o /tmp/_x /tmp/_x17.cpp 2>/dev/null; then _std=17
+  elif g++ -O2 -std=c++11 -pthread -o /tmp/_x /tmp/_x17.cpp 2>/dev/null; then _std=11
+  elif g++ -O2 -o /tmp/_x /tmp/_x03.cpp 2>/dev/null; then _std=03
+  fi
+  kv cxx_std "$_std"
   kv compile_cxx "$( [ -x /tmp/_x ] && [ "$(/tmp/_x 2>/dev/null)" = xok ] && echo Y || echo N )"
-else kv compile_cxx n/a; fi
+else kv compile_cxx n/a; kv cxx_std n/a; fi
 
 # apt 往返（有 apt 的档）
 # ⚠️ 必须用**带 maintainer script** 的包。之前用 tree（控制包里只有 control+md5sums）

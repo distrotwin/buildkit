@@ -419,6 +419,9 @@ build_pkgslice() {
   # 悬空会让一切写 /tmp 的程序失败 —— 建实目录，保留原软链形态
   mkdir -p "$D/ramdisk/tmp" "$D/var/tmp" "$D/proc" "$D/sys" "$D/dev" "$D/root"
   chmod 1777 "$D/ramdisk/tmp" "$D/var/tmp"
+  # /tmp 本体：pkg db 不登记它，介质也就不带 —— 上一轮镜像里根本没有 /tmp，
+  # gcc 一开口就倒。按厂商原样补软链（真机 /tmp -> ./ramdisk/tmp）。
+  [ -e "$D/tmp" ] || ln -s ./ramdisk/tmp "$D/tmp"
   # pre-os-release 世代：容器生态以 /etc/os-release 为身份判据，从厂商
   # linx-release 合成一份，文件头注明容器化添加（与 selfhost 路同规）
   if [ ! -e "$D/etc/os-release" ] && [ -f "$MEDIA/etc/linx-release" ]; then

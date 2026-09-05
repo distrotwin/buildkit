@@ -424,6 +424,10 @@ build_pkgslice() {
   [ -e "$D/tmp" ] || ln -s ./ramdisk/tmp "$D/tmp"
   # pre-os-release 世代：容器生态以 /etc/os-release 为身份判据，从厂商
   # linx-release 合成一份，文件头注明容器化添加（与 selfhost 路同规）
+  # 厂商身份原件也随镜像走（os-release 是合成的，原件在介质根，pkg 清单不含它）
+  for _idf in linx-release issue; do
+    [ -f "$MEDIA/etc/$_idf" ] && [ ! -e "$D/etc/$_idf" ] && cp -a "$MEDIA/etc/$_idf" "$D/etc/$_idf"
+  done
   if [ ! -e "$D/etc/os-release" ] && [ -f "$MEDIA/etc/linx-release" ]; then
     local _pn; _pn=$(head -1 "$MEDIA/etc/linx-release")
     {

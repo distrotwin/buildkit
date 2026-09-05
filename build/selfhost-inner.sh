@@ -72,6 +72,25 @@ if [ "${NO_CHECK_GPG:-no}" != yes ]; then
     || { say "致命: keyring 落位后为空"; exit 1; }
 else
   say "介质无签名（NO_CHECK_GPG=yes），不注入任何 keyring"
+# pre-systemd 世代（squeeze 等）没有 /etc/os-release。容器生态（含本项目的
+# 验收）以它为身份判据，缺失时从厂商自己的 release 文件合成一份，文件头注明
+# 是容器化添加而非厂商原生 —— 不写这份文件的话 os_id 检查会把整档判失败，
+# 写而不注明则是在冒充厂商文件。
+if [ ! -e /etc/os-release ] && [ ! -e /usr/lib/os-release ]; then
+  _pn=""
+  [ -f /etc/linx-release ] && _pn=$(head -1 /etc/linx-release)
+  [ -z "$_pn" ] && [ -f /etc/issue ] && _pn=$(head -1 /etc/issue | tr -d '\\ln')
+  if [ -n "$_pn" ]; then
+    {
+      printf '# 本文件由 distrotwin 构建注入：该系统世代早于 os-release 规范，\n'
+      printf '# 内容取自厂商 release 文件，仅供容器工具链识别。\n'
+      printf 'NAME="%s"\nID=linx\nPRETTY_NAME="%s"\nVERSION_ID="%s"\n' \
+        "$_pn" "$_pn" "$(printf '%s' "$_pn" | grep -oE '[0-9][0-9.]*' | head -1)"
+    } > /etc/os-release
+    say "已合成 /etc/os-release（$_pn，文件头注明容器化添加）"
+  fi
+fi
+
 fi
 # 在线源要验签；介质本地源没有签名（完整性锚点是 ISO 的官方校验值），
 # 所以按 NO_CHECK_GPG 决定用 signed-by 还是 trusted=yes。

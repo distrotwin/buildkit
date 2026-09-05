@@ -132,7 +132,8 @@ for DID in $DISTROS; do
         EXPECT_GLIBC EXPECT_LIBSTDCPP EXPECT_GLIBCXX IMAGE METHOD USRMERGE DISPLAY_NAME \
         EXPECT_CXX EXPECT_OS_REPO \
         SRC_ROOTFS ISO_URL ISO_SQUASHFS_PATH SQUASHFS_SHA256 DEBOOTSTRAP_SCRIPT \
-        FAMILY EXPECT_SHADOW NO_CHECK_GPG RPM_DB_BACKEND MEDIA_DIR REPO_BASES RPM_KEY RPM_KEY_FP RPM_DB_VIA_TARGET
+        FAMILY EXPECT_SHADOW NO_CHECK_GPG RPM_DB_BACKEND MEDIA_DIR REPO_BASES RPM_KEY RPM_KEY_FP RPM_DB_VIA_TARGET \
+        ELF_BROKEN_OK DANGLING_ETC_OK
   # 同上：conf 可能引用 ARCH 派生的变量，先把它们备好再 source。
   . "$BK/lib/arch.sh"
   . "$ROOT/distros/$DID.conf"
@@ -198,8 +199,12 @@ for DID in $DISTROS; do
     # 坏 ELF 按**文件名**白名单，不按数量放宽：允许「1 个」会对任何新增的坏 ELF
     # 放过，允许「q_atm.so」只放过已论证的那一个。
     #   · q_atm.so —— iproute2 的 tc ATM 插件，厂商包本身不带 libatm（缺陷 D11）
+    # conf 可按被试追加白名单（ELF_BROKEN_OK，空格分隔文件名）：凝思 60 的
+    # gpgkeys_ldap 链 libldap 而厂商介质不带它，属厂商包自身的可选依赖缺失
+    _eok='q_atm\.so'
+    for _w in ${ELF_BROKEN_OK:-}; do _eok="$_eok|$(printf '%s' "$_w" | sed 's/[.[\*^$]/\\&/g')"; done
     ebad=$(printf '%s' "$(g elf_broken_list)" | tr ',' '\n' | grep -v '^$' \
-      | grep -vxE 'q_atm\.so' | tr '\n' ' ')
+      | grep -vxE "$_eok" | tr '\n' ' ')
     [ -z "$ebad" ] && pass "elf_broken（白名单外无坏 ELF，计数 $(g elf_broken)）" \
       || fail "elf_broken 白名单外: $ebad"
     check getent_passwd Y "$(g getent_passwd)"
@@ -228,8 +233,10 @@ for DID in $DISTROS; do
     # 悬空软链：厂商自带/切片残留的几条是已知且惰性的，不删（删了就动了"等价环境"）；
     # 但清单之外的一律失败 —— 我自己就往 micro 档造过一条 default.target 悬空链，
     # 当时没有任何检查能发现它。
+    _dok='99-sysctl\.conf|modules\.conf|vconsole\.conf|99apt-download-hook'
+    for _w in ${DANGLING_ETC_OK:-}; do _dok="$_dok|$(printf '%s' "$_w" | sed 's/[.[\*^$]/\\&/g')"; done
     unexpected=$(printf '%s' "$(g dangling_etc_list)" | tr ',' '\n' | grep -v '^$' \
-      | grep -vxE '99-sysctl\.conf|modules\.conf|vconsole\.conf|99apt-download-hook' | tr '\n' ' ')
+      | grep -vxE "$_dok" | tr '\n' ' ')
     [ -z "$unexpected" ] && pass "dangling_etc 仅已知项" \
       || fail "dangling_etc 出现清单外悬空软链: $unexpected"
     # 包数下限：status 断链时 dpkg-query 输出 0 行且退出码 0（历史假通过的机制本身）
@@ -346,7 +353,12 @@ for DID in $DISTROS; do
     # 而 LoongArch 最早的 glibc 就是 2.36，不存在「低于 2.17 的地板」这回事。
     # build-gates.sh 会把这个事实写进 .gate-status，这里读它——
     # 那个文件此前一直没人读，等于一个悬空机制。
-    if grep -q GATE_LOW_NA "$BK/gate/.gate-status" 2>/dev/null; then
+    _gmaj=$(printf '%s' "$EXPECT_GLIBC" | cut -d. -f1); _gmin=$(printf '%s' "$EXPECT_GLIBC" | cut -d. -f2)
+    if [ "${_gmaj:-2}" -le 2 ] && [ "${_gmin:-99}" -lt 14 ]; then
+      # 探针自身要 GLIBC_2.14；被试比探针地板还老（凝思 60 是 2.11）时报的是
+      # 「探针跑不动」不是「被试不合格」——量的是尺子不是被试，按下限跳过。
+      skip gate_low "被试 glibc $EXPECT_GLIBC 低于探针地板 2.14，此探针不适用"
+    elif grep -q GATE_LOW_NA "$BK/gate/.gate-status" 2>/dev/null; then
       skip gate_low "该架构没有低地板工具链（manylinux2014 无此架构，且其最早 glibc 已高于 2.17）"
     else
       r=$(docker run --rm -v "$BK/gate:/g:ro" "$IMG" /g/t_low 2>&1 | tail -1)

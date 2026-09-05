@@ -398,6 +398,43 @@ build_rpmrepo() {
   make_tarball "$D" "$ROOT/out/$DID-$TIER.tar"
 }
 
+# ── pkgslice：自研 pkg 数据库（CRUX pkgutils 式）的整盘 rootfs，按 ELF 闭包切片 ──
+# 凝思 6.0.42（磐石 Rocky 4.2）的 ISO 是摊开的 rootfs，包管理是 /var/lib/pkg/db，
+# 没有依赖字段 —— 闭包在取材期按 ELF NEEDED 算好（.pkgmap），这里只做确定性拷贝。
+build_pkgslice() {
+  local TIER=$1 seeds
+  case $TIER in
+    micro) seeds="$SLICE_MICRO" ;;
+    base)  seeds="$SLICE_MICRO,$SLICE_BASE_EXTRA" ;;
+    devel) seeds="$SLICE_MICRO,$SLICE_BASE_EXTRA,$SLICE_DEVEL_EXTRA" ;;
+    *) die "未知档位 $TIER" ;;
+  esac
+  local MEDIA="$ROOT/media/$MEDIA_DIR"
+  [ -f "$MEDIA/.pkgmap" ] || die "介质缺 .pkgmap: $MEDIA（srcdata 取材未就位？）"
+  local D="$ROOT/work/$DID-$TIER" OUT="$ROOT/out/$DID-$TIER.tar"
+  rm -rf "$D"; rm -f "$OUT"
+  log "[$DID/$TIER] pkgslice 切片"
+  python3 "$BK/tools/pkgdb-slice.py" tier "$MEDIA" "$D" "$seeds" || die "[$DID/$TIER] 切片失败"
+  # 该世代 /tmp 是指向 ./ramdisk/tmp 的软链（真机由 ramdisk 挂载兜住），容器里
+  # 悬空会让一切写 /tmp 的程序失败 —— 建实目录，保留原软链形态
+  mkdir -p "$D/ramdisk/tmp" "$D/var/tmp" "$D/proc" "$D/sys" "$D/dev" "$D/root"
+  chmod 1777 "$D/ramdisk/tmp" "$D/var/tmp"
+  # pre-os-release 世代：容器生态以 /etc/os-release 为身份判据，从厂商
+  # linx-release 合成一份，文件头注明容器化添加（与 selfhost 路同规）
+  if [ ! -e "$D/etc/os-release" ] && [ -f "$MEDIA/etc/linx-release" ]; then
+    local _pn; _pn=$(head -1 "$MEDIA/etc/linx-release")
+    {
+      printf '# 本文件由 distrotwin 构建注入：该系统世代早于 os-release 规范，\n'
+      printf '# 内容取自厂商 /etc/linx-release，仅供容器工具链识别。\n'
+      printf 'NAME="%s"\nID=linx-rocky\nPRETTY_NAME="%s"\nVERSION_ID="%s"\n' \
+        "$_pn" "$_pn" "$(printf '%s' "$_pn" | grep -oE '[0-9][0-9.]*' | head -1)"
+    } > "$D/etc/os-release"
+  fi
+  ( cd "$D" && tar --numeric-owner -cf "$OUT" . ) || { log "[$DID/$TIER] 打包失败"; return 1; }
+  [ -s "$OUT" ] || { log "[$DID/$TIER] 无产物"; return 1; }
+  log "[$DID/$TIER] 完成 $(du -h "$OUT"|cut -f1)"
+}
+
 build_rpmmedia() {
   local TIER=$1 seeds
   case $TIER in
@@ -422,7 +459,7 @@ build_rpmmedia() {
 }
 
 case $METHOD in
-  mmdebstrap|slice|selfhost|debmedia|rpmmedia|rpmrepo) ;;
+  mmdebstrap|slice|selfhost|debmedia|rpmmedia|rpmrepo|pkgslice) ;;
   *) die "未知 METHOD=$METHOD" ;;
 esac
 [ "$METHOD" = mmdebstrap ] && verify_repo_signature "${MIRROR%/}" "$SUITE"
@@ -443,6 +480,7 @@ else
       slice)      build_slice "$T" ;;
       debmedia)   build_debmedia "$T" ;;
       rpmmedia)   build_rpmmedia "$T" ;;
+      pkgslice)   build_pkgslice "$T" ;;
       rpmrepo)    build_rpmrepo "$T" ;;
     esac
   done

@@ -14,6 +14,24 @@ import re
 import shutil
 import subprocess
 import sys
+
+# VIA_TARGET 期间给 chroot 补的 /dev 节点（rootless 下是 bind），main 收尾统一拆
+_DEV_MK, _DEV_BIND = [], []
+
+
+def _dev_cleanup(dst):
+    for _p in _DEV_BIND:
+        subprocess.run(["umount", _p], check=False)
+        try:
+            os.unlink(_p)
+        except OSError:
+            pass
+    for _p in _DEV_MK:
+        try:
+            os.unlink(_p)
+        except OSError:
+            pass
+    del _DEV_BIND[:], _DEV_MK[:]
 import xml.etree.ElementTree as ET
 
 NS = {"c": "http://linux.duke.edu/metadata/common",
@@ -97,7 +115,14 @@ def main():
     # 实测 loong64 的 base 档取材算 169 个而这里重算 166 个。ISO 介质那条路径
     # 没有这个文件，仍走自己算。
     _cl = os.path.join(media, ".closure")
-    if os.path.exists(_cl):
+    _cs = os.path.join(media, ".closure-seeds")
+    if os.path.exists(_cl) and os.path.exists(_cs) \
+            and open(_cs).read().strip() != ",".join(seeds):
+        # 介质是全档共用的（取材种子=全档并集），本次装的是子集档位：
+        # 交接清单不适用，按本档种子自算；介质里的包是超集，闭包必然可满足。
+        print("    介质闭包种子与本档不同（全档介质），按本档种子自算闭包")
+        _cl = None
+    if _cl and os.path.exists(_cl):
         keep = {x.strip() for x in open(_cl) if x.strip()}
         _absent = sorted(n for n in keep if n not in pkgs)
         if _absent:
@@ -112,6 +137,8 @@ def main():
     # primary 不足以自描述（例如路径型依赖的提供者没有登记进 provides），
     # 而后果是这里"成功地"少装几个包，直到装完的依赖自洽检查才报未满足依赖。
     _cc = os.path.join(media, ".closure-count")
+    if _cl is None:
+        _cc = "/nonexistent"   # 全档介质装子集档位：条数对账同样不适用
     if os.path.exists(_cc):
         _want = int(open(_cc).read().strip() or 0)
         if _want != len(keep):
@@ -196,6 +223,24 @@ def main():
         if not os.path.exists(trpm):
             sys.exit("RPM_DB_VIA_TARGET=yes 但 rootfs 里没有 /usr/bin/rpm，无从重建")
         print("用目标自己的 rpm 重建数据库（宿主与目标的后端没有交集）…")
+        # EL7 的 rpm 4.11 走 NSS，chroot 里没有 /dev/urandom 时 rpmInitCrypto 直接
+        # 报 Failed to initialize NSS library（4.15+ 走 openssl 无此问题）。先补
+        # 设备节点；rootless 场景 mknod 会 EPERM，退回 bind 宿主节点，用完拆掉。
+        import stat as _stat
+        _devd = os.path.join(dst, "dev"); os.makedirs(_devd, exist_ok=True)
+        global _DEV_MK, _DEV_BIND
+        _mk, _bind = _DEV_MK, _DEV_BIND
+        for _n, _mj, _mi in (("null", 1, 3), ("urandom", 1, 9), ("random", 1, 8)):
+            _p = os.path.join(_devd, _n)
+            if os.path.exists(_p):
+                continue
+            try:
+                os.mknod(_p, 0o666 | _stat.S_IFCHR, os.makedev(_mj, _mi))
+                _mk.append(_p)
+            except PermissionError:
+                open(_p, "w").close()
+                subprocess.run(["mount", "--bind", "/dev/" + _n, _p], check=True)
+                _bind.append(_p)
         shutil.rmtree(os.path.join(dst, "var/lib/rpm"), ignore_errors=True)
         r = subprocess.run(["chroot", os.path.abspath(dst), "/usr/bin/rpm", "--initdb"],
                            capture_output=True, text=True, timeout=300)
@@ -281,6 +326,22 @@ def main():
                     if _m:
                         _links.append(_m.group(1))
             if _cmds:
+                # scriptlet 里有的 alternatives 调用在 for 循环里、参数是 shell 变量
+                # （an7 的 iptables：--install /sbin/ip6tables.dummy "${p##*/}" "$ipt"）。
+                # 逐行重放脱离了变量上下文必然失败，alternatives 会静默不建链接。
+                # 这类命令不重放、其链接不进断言，如实打印跳过——比"重放了但断言
+                # 放宽"诚实：跳过是能力边界，放宽是掩盖。
+                _skipped = [c for c in _cmds if "$" in c]
+                if _skipped:
+                    _cmds = [c for c in _cmds if "$" not in c]
+                    _drop = set()
+                    for _c in _skipped:
+                        _m = re.search(r"--install\s+(\S+)", _c)
+                        if _m:
+                            _drop.add(_m.group(1))
+                    _links = [l for l in _links if l not in _drop]
+                    print("    跳过 %d 条含 shell 变量的 alternatives（无法脱离脚本上下文重放）：%s"
+                          % (len(_skipped), " ".join(sorted(_drop))))
                 print("重放 %d 条 alternatives --install（--noscripts 跳过的 %%post）…" % len(_cmds))
                 for _cmd in _cmds:
                     subprocess.run(["chroot", os.path.abspath(dst), "/bin/sh", "-c", _cmd],
@@ -366,6 +427,7 @@ def main():
         for n in order:
             fh.write(f"{pkgs[n]['name']}\n")
     n_files = sum(len(fs) for _, _, fs in os.walk(dst))
+    _dev_cleanup(dst)
     print(f"完成：{len(files)} 个包，rootfs 里 {n_files} 个文件"
           f"，包清单已写入 /var/lib/rpm/.sliced-packages")
     if n_files < 200:

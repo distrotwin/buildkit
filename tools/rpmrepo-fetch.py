@@ -406,6 +406,11 @@ def main():
     # 让取材算一次、装包直接用，这一类分叉就不存在了。
     with open(os.path.join(dst, ".closure"), "w") as f:
         f.write("\n".join(sorted(r["name"] for r in sel)) + "\n")
+    # 交接清单只对「同一份种子」有效。srcdata 介质是三档共用一份、按全档种子
+    # 取材的，装包按 tier 传子集种子 —— 不核对就采用会让 micro 装进全档闭包
+    # （实测 dnf 混进 micro）。装包侧按这个指纹决定采用还是自算。
+    with open(os.path.join(dst, ".closure-seeds"), "w") as f:
+        f.write(seedstr + "\n")
     with open(os.path.join(dst, ".epoch"), "w") as f:
         f.write("%d\n" % epoch)
     print("  SOURCE_DATE_EPOCH 锚点 = %d（各源 revision 取最大）" % epoch)

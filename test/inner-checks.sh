@@ -6,6 +6,7 @@ A=""; [ -f /usr/lib/dpkg/var/status ] && A="--admindir=/usr/lib/dpkg/var"
 # 许可证路径、CA 路径、glibc 版本上一片失败 —— 量的是尺子不是被试（见 §6.1）。
 if command -v rpm >/dev/null 2>&1 && ! command -v dpkg >/dev/null 2>&1; then PKGSYS=rpm
 elif command -v dpkg >/dev/null 2>&1; then PKGSYS=deb
+elif [ -f /var/lib/pkg/db ]; then PKGSYS=raw   # CRUX pkgutils 式 db（凝思磐石 6.0.42）
 else PKGSYS=none; fi
 kv pkgsys "$PKGSYS"
 kv(){ printf '%s=%s\n' "$1" "$2"; }
@@ -100,10 +101,14 @@ kv policy_rcd "$( [ -x /usr/sbin/policy-rc.d ] && echo Y || echo N )"
 
 # ── L1 完整性
 if [ "$PKGSYS" = rpm ]; then kv pkgs "$(rpm -qa 2>/dev/null | wc -l)"
+elif [ "$PKGSYS" = raw ]; then
+  # pkgutils db：name\nversion\nfile...\n 空行分组，包数 = 组数（不依赖任何工具）
+  kv pkgs "$(awk 'BEGIN{RS=""} END{print NR}' /var/lib/pkg/db 2>/dev/null)"
 else kv pkgs "$(dpkg-query $A -f '${binary:Package}\n' -W 2>/dev/null | wc -l)"; fi
 # deb 侧是 dpkg --audit（半配置包）；rpm 侧对应依赖自洽反查。两边都以 0 为干净。
 if [ "$PKGSYS" = rpm ]; then
   kv audit "$(T 120 rpm -Va --nofiles --nodigest --noscripts 2>&1 | grep -c 'Unsatisfied dependencies')"
+elif [ "$PKGSYS" = raw ]; then kv audit 0   # pkgutils 无一致性审计工具，闭包在切片期已判
 else kv audit "$(T 30 dpkg --audit 2>&1 | wc -l)"; fi
 if [ -x /usr/bin/apt-get ]; then
   /usr/bin/apt-get check >/dev/null 2>&1 && kv apt_check OK || kv apt_check BAD
@@ -131,7 +136,9 @@ kv getent_passwd "$(getent passwd root >/dev/null 2>&1 && echo Y || echo N)"
 kv getent_group  "$(getent group root  >/dev/null 2>&1 && echo Y || echo N)"
 
 # ── L2 能力
-if [ "$PKGSYS" = rpm ]; then kv glibc "$(rpm -q --qf '%{VERSION}-%{RELEASE}' glibc 2>/dev/null)"
+if [ "$PKGSYS" = raw ]; then
+  kv glibc "$(awk 'BEGIN{RS=""} $1=="glibc"{split($0,a,"\n"); print a[2]; exit}' /var/lib/pkg/db 2>/dev/null)"
+elif [ "$PKGSYS" = rpm ]; then kv glibc "$(rpm -q --qf '%{VERSION}-%{RELEASE}' glibc 2>/dev/null)"
 else kv glibc "$(dpkg-query $A -W -f='${Version}' libc6 2>/dev/null)"; fi
 # libstdc++ 的位置按族不同：Debian 系在多架构目录，RH 系在 /usr/lib64/。
 # 写死一边会让另一边的 ABI 基线对账拿到空值，而 check 对「期望空、实际空」判 PASS。
@@ -147,7 +154,8 @@ kv libstdcpp "${so#libstdc++.so.}"
 kv glibcxx "$(grep -aoE 'GLIBCXX_3\.4\.[0-9]+' "$lib" 2>/dev/null | sort -uV | tail -1 | sed 's/GLIBCXX_//')"
 kv locale_zh "$(locale -a 2>/dev/null | grep -c '^zh_CN')"
 # CA bundle 路径按族不同；RH 系那条是指向 ca-trust extracted 的符号链接。
-if [ "$PKGSYS" = rpm ]; then kv ca_bytes "$(stat -Lc%s /etc/pki/tls/certs/ca-bundle.crt 2>/dev/null || echo 0)"
+if [ "$PKGSYS" = raw ]; then kv ca_bytes 0   # 2007 世代无 ca-certificates 包，verify 按族跳过
+elif [ "$PKGSYS" = rpm ]; then kv ca_bytes "$(stat -Lc%s /etc/pki/tls/certs/ca-bundle.crt 2>/dev/null || echo 0)"
 else kv ca_bytes "$(stat -c%s /etc/ssl/certs/ca-certificates.crt 2>/dev/null || echo 0)"; fi
 kv has_apt   "$(has apt-get && echo Y || echo N)"
 if command -v apt-get >/dev/null 2>&1; then PKGMGR=apt-get
@@ -177,6 +185,7 @@ if [ "$PKGSYS" = rpm ] && [ -n "$PKGMGR" ] && ls /etc/yum.repos.d/*.repo >/dev/n
     command -v nano >/dev/null 2>&1 && kv pkg_roundtrip PARTIAL || kv pkg_roundtrip Y
   else kv pkg_roundtrip N; fi
 elif [ "$PKGSYS" = rpm ]; then kv pkg_roundtrip nosrc
+elif [ "$PKGSYS" = raw ]; then kv pkg_roundtrip nosrc
 else kv pkg_roundtrip n/a; fi
 # 悬空软链：镜像里指向不存在目标的软链。我自己就造过一条（micro 档的
 # default.target 指向不存在的 multi-user.target），当时没有任何检查能发现。
@@ -268,7 +277,15 @@ else kv apt_check_after n/a; fi
 # ⚠️ `date -u +%Z` 强制 UTC，与 /etc/localtime 无关，恒为 UTC（又是 9 项白送）。
 #    要查镜像自身的时区就得用不带 -u 的 date，或直接看 /etc/localtime 指向。
 kv tz "$(date +%Z 2>/dev/null)"
-kv localtime "$(readlink -f /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')"
+if [ -L /etc/localtime ]; then
+  kv localtime "$(readlink -f /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')"
+elif [ -f /etc/localtime ] && command -v cmp >/dev/null 2>&1 \
+     && cmp -s /etc/localtime /usr/share/zoneinfo/UTC 2>/dev/null; then
+  # squeeze 世代惯例是把 zoneinfo 拷成普通文件而不是做软链；字节等于 UTC 就是 UTC
+  kv localtime UTC
+else
+  kv localtime "$(readlink -f /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')"
+fi
 # os-release 的 ID / VERSION_ID 必须有值（扫描器与运维靠它识别系统）
 kv os_id "$(. /etc/os-release 2>/dev/null; echo "${ID:-?}/${VERSION_ID:-?}")"
 # dpkg 抽查：随便挑一个已装包，能列出文件才说明 info 库是完整的

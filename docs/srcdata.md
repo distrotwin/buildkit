@@ -55,16 +55,16 @@ docker rm "$C"
 
 ## 命名与 tag
 
+所有数据镜像集中放一个 package：
+
 ```
-ghcr.io/distrotwin/<repo>-srcdata:<介质日期>-<架构>
-例：ghcr.io/distrotwin/linx-srcdata:20230822-x86_64
+ghcr.io/distrotwin/scratch:<介质标识>
+例：ghcr.io/distrotwin/scratch:linxos-6.0.100-20230822-x86_64
 ```
 
-两条规矩：
+**package 必须 public，这是算过账的，不是偷懒。** 免费档 org 的 private 包总配额只有 500 MB，还和 Actions artifacts 共享；没绑付款方式时超额是直接阻断而不是计费。一份凝思介质就约 189 MB，配额必超。public 的存储与流量在官方文档里明写免费。集中放一个 public package 也顺便消掉了「private 包要逐仓库授访问权」那个易错环节 —— 漏授的症状是 runner 报 404 而不是 403，很容易误判成 tag 写错。
 
-**数据镜像归属它服务的那个下游仓库**，不要集中放在 `buildkit` 名下。GHCR 的包权限是按仓库授的，放在自己仓库名下，该仓库的 workflow 用 `GITHUB_TOKEN` 天然能拉；集中放则每个下游都要额外授权一次。
-
-**tag 用介质自己的日期，不用构建日期。** 数据镜像是介质的函数，同一个 ISO 无论切几次都该得到同一个 tag，这样重复切料是幂等的，也能一眼看出镜像对应哪份介质。厂商出新版介质才有新 tag。
+**tag 用介质自己的标识（ISO 文件名去扩展名，或源快照日期），不用构建日期。** 数据镜像是介质的函数，同一个 ISO 无论切几次都该得到同一个 tag，这样重复切料是幂等的，也能一眼看出镜像对应哪份介质。厂商出新版介质才有新 tag。
 
 ## 完整性锚：数据镜像不是权威来源
 
@@ -83,11 +83,9 @@ ghcr.io/distrotwin/<repo>-srcdata:<介质日期>-<架构>
 
 ## 谁造、什么时候造
 
-**本机造，手工触发，不进 CI**——只有本机能取材，放进 CI 没有意义。介质不变就不需要重造。
+**本机造，手工触发，不进 CI**——只有本机能取材，放进 CI 没有意义。介质不变就不需要重造。工具是 `tools/srcdata-make.sh`（打包、推送、拉回验 digest、打印要钉进 conf 的 manifest 指纹），runner 侧对应 `tools/srcdata-fetch.sh`（拉取、两道 manifest 门禁、展示 `.origin`）。
 
-一次性的手工配置：本机用 PAT 推的包，默认不关联任何仓库，org 内的 workflow 拉不到。推完第一次要去 package settings 里把对应的下游仓库加进访问列表（或设为 public）。**这一步漏了的症状是 runner 报 404 而不是 403**，很容易误判成「tag 写错了」。
-
-本机那个 `gh` token 通常只有 `read:packages`／`delete:packages`，推之前需要 `gh auth refresh -s write:packages` 或另给一个 PAT。
+本机那个 `gh` token 通常只有 `read:packages`／`delete:packages`，推之前需要 `gh auth refresh -s write:packages` 或另给一个 PAT。首次推出的 package 记得设为 public。
 
 ## runner 侧怎么接
 

@@ -128,6 +128,20 @@ jobs:
             echo "${{ inputs.distro-id }} 无 REPACK_DEBS / STUB_PROVIDES，跳过本地源"
           fi
 
+      # 数据镜像取材：厂商站对 runner 不可达的系统，材料由本机切好推到
+      # ghcr.io/distrotwin/scratch（public，零计费），这里取回并逐文件验 manifest。
+      # conf 没给 SRCDATA_IMAGE 的系统走原有逻辑，这一步是空转。
+      - name: 数据镜像取材（仅 SRCDATA_IMAGE 的版本）
+        env: { ARCH: "${{ inputs.arch }}", ROOT: "${{ github.workspace }}" }
+        run: |
+          set -eu
+          IMG=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SRCDATA_IMAGE)
+          if [ -n "$IMG" ]; then
+            ROOT="$ROOT" buildkit/tools/srcdata-fetch.sh '${{ inputs.distro-id }}'
+          else
+            echo "${{ inputs.distro-id }} 无 SRCDATA_IMAGE，跳过"
+          fi
+
       # 重试交给 nick-fields/retry，脚本本身只管跑一次。
       # 源对境外出口偶发卡死（返回 200、Content-Length 正确、body 零字节；
       # debootstrap 侧表现为 "Couldn't download packages"），是外部条件不是逻辑问题。

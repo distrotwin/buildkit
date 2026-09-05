@@ -174,7 +174,13 @@ jobs:
             KFP=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' RPM_KEY_FP)
             if [ -n "$KFP" ]; then PROV+=(-c "LABEL cn.internal.rpm-key-fp=\"$KFP\""); fi
             if [ -n "$SQSHA" ]; then PROV+=(-c "LABEL cn.internal.squashfs-sha256=\"$SQSHA\""); fi
-            [ ${#PROV[@]} -gt 0 ] || { echo "::error::conf 里既无 suite、也无 ISO、也无 REPO_BASES，记不下溯源锚点"; exit 1; }
+            # 数据镜像路径：材料经本机中转，锚点是数据镜像 tag 加 manifest 指纹，
+            # 由它再链回 .origin 里的厂商锚点（ISO 官方校验和 / 源 Release 指纹）。
+            SDI=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SRCDATA_IMAGE)
+            if [ -n "$SDI" ]; then PROV+=(-c "LABEL cn.internal.srcdata-image=\"$SDI\""); fi
+            SDM=$(ARCH="$a" buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SRCDATA_MANIFEST_SHA256)
+            if [ -n "$SDM" ]; then PROV+=(-c "LABEL cn.internal.srcdata-manifest-sha256=\"$SDM\""); fi
+            [ ${#PROV[@]} -gt 0 ] || { echo "::error::conf 里既无 suite、也无 ISO、也无 REPO_BASES、也无 SRCDATA_IMAGE，记不下溯源锚点"; exit 1; }
 
             # 溯源信息在这里打而不是 import 时，是因为 commit SHA 与 run URL 只有发布
             # 阶段才知道，而两条构建路径的 import 分处两个脚本——写在那儿会变成

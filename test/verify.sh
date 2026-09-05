@@ -476,7 +476,11 @@ for DID in $DISTROS; do
     # 写死一个值会把发行版惯例差异报成缺陷，而真正该守的是「与该发行版的基线一致」。
     # 值与理由都记在 distros/*.conf 的 EXPECT_SHADOW。
     check shadow  "${EXPECT_SHADOW:?distros/$DID.conf 缺 EXPECT_SHADOW}" "$(g shadow)"
-    check gshadow "${EXPECT_SHADOW}" "$(g gshadow)"
+    if [ "${FAMILY:-deb}" = raw ] && [ "$(g gshadow)" = 缺 ]; then
+      pass "gshadow 缺（raw：磐石世代无 gshadow 机制，介质原样）"
+    else
+      check gshadow "${EXPECT_SHADOW}" "$(g gshadow)"
+    fi
   done
 done
 echo

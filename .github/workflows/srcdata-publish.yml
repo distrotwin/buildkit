@@ -1,0 +1,51 @@
+name: 转推数据镜像
+
+# 本机切好的介质 → release asset → 本 workflow 导入并推 GHCR。
+# 为什么绕这一道：GHCR 包的可见性没有 API，本机 PAT 首推的包落成 internal
+# （计费上等同 private，占 500 MB 免费配额），而 workflow 用 GITHUB_TOKEN 首推
+# 的包继承仓库可见性 —— 本仓库 public，包即 public、零计费（实测判据：
+# probe-pkg-visibility 首推读回 visibility=public）。
+on:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: "存放介质 asset 的 release tag"
+        type: string
+        required: true
+      specs:
+        description: "空格分隔的 <asset名(不含.tar.zst)>=<镜像tag>=<manifest sha256>"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 逐个导入并推送
+        run: |
+          set -eu
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          for spec in ${{ inputs.specs }}; do
+            A="${spec%%=*}"; rest="${spec#*=}"; T="${rest%%=*}"; PIN="${rest#*=}"
+            U="https://github.com/${{ github.repository }}/releases/download/${{ inputs.release-tag }}/$A.tar.zst"
+            echo "── $A → scratch:$T"
+            curl -sSL --fail -o a.zst "$U"
+            IMG="ghcr.io/${{ github.repository_owner }}/scratch:$T"
+            zstd -dc a.zst | docker import - "$IMG" >/dev/null
+            # 推之前先验内容：manifest 指纹必须与本机切料时打印的一致
+            C=$(docker create "$IMG" /nonexistent)
+            docker cp "$C:/src/.manifest" m; docker rm "$C" >/dev/null
+            G=$(sha256sum m | cut -d' ' -f1)
+            [ "$G" = "$PIN" ] || { echo "::error::$A manifest 不符：期望 $PIN 实得 $G"; exit 1; }
+            docker push -q "$IMG" >/dev/null
+            docker rmi "$IMG" >/dev/null; rm -f a.zst m
+            echo "  ✓ 已推 $IMG"
+          done
+          V=$(curl -sS -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/orgs/${{ github.repository_owner }}/packages/container/scratch" | jq -r .visibility)
+          echo "包可见性: $V"
+          [ "$V" = public ] || { echo "::error::包不是 public（$V），计费上等同 private"; exit 1; }

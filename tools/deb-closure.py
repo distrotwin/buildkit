@@ -10,6 +10,63 @@
 """
 import gzip, os, re, sys
 
+
+def vercmp(a, b):
+    """deb 版本比较（Debian Policy 5.6.12 的实现，不是字符串比较）。
+    字符串比较在 2.31-13+deb11u3 vs 2.31-9 这类值上会答反 —— 合并多个
+    suite 挑赢家时这直接决定选哪个包，错不起。"""
+    def split_epoch(v):
+        if ':' in v:
+            e, r = v.split(':', 1)
+            return int(e), r
+        return 0, v
+
+    def order(c):
+        if c == '~':
+            return -1
+        if c.isdigit():
+            return 0
+        if c.isalpha():
+            return ord(c)
+        return ord(c) + 256
+
+    def cmp_part(x, y):
+        while x or y:
+            # 非数字段
+            while (x and not x[0].isdigit()) or (y and not y[0].isdigit()):
+                cx = order(x[0]) if x and not x[0].isdigit() else 0
+                cy = order(y[0]) if y and not y[0].isdigit() else 0
+                if cx != cy:
+                    return cx - cy
+                if x and not x[0].isdigit():
+                    x = x[1:]
+                if y and not y[0].isdigit():
+                    y = y[1:]
+            # 数字段
+            nx = ny = ''
+            while x and x[0].isdigit():
+                nx += x[0]; x = x[1:]
+            while y and y[0].isdigit():
+                ny += y[0]; y = y[1:]
+            d = int(nx or 0) - int(ny or 0)
+            if d:
+                return d
+        return 0
+
+    ea, ra = split_epoch(a)
+    eb, rb = split_epoch(b)
+    if ea != eb:
+        return ea - eb
+    if '-' in ra:
+        ua, xa = ra.rsplit('-', 1)
+    else:
+        ua, xa = ra, ''
+    if '-' in rb:
+        ub, xb = rb.rsplit('-', 1)
+    else:
+        ub, xb = rb, ''
+    return cmp_part(ua, ub) or cmp_part(xa, xb)
+
 def parse(path):
     op = gzip.open if path.endswith('.gz') else open
     txt = op(path, 'rt', errors='replace').read()
@@ -48,6 +105,7 @@ def dep_names(field):
 
 def main():
     media, seedstr = sys.argv[1], sys.argv[2]
+    outfile = sys.argv[3] if len(sys.argv) > 3 else '/tmp/deb.closure' 
     pkgs = {}
     provides = {}
     for root, _, files in os.walk(os.path.join(media, 'dists')):
@@ -58,7 +116,7 @@ def main():
                 for d in parse(os.path.join(root, f)):
                     n = d['Package']
                     # 同名多版本取版本串最大的（介质里罕见，但不能默认唯一）
-                    if n not in pkgs or d.get('Version','') > pkgs[n].get('Version',''):
+                    if n not in pkgs or vercmp(d.get('Version','0'), pkgs[n].get('Version','0')) > 0:
                         pkgs[n] = d
     for n, d in pkgs.items():
         provides.setdefault(n, n)
@@ -67,11 +125,19 @@ def main():
             if p:
                 provides.setdefault(p, n)     # 虚拟包 → 真实提供者
 
-    # debootstrap 阶段一要的是 Priority: required；把它并进种子，
-    # 否则算出来的闭包装不出一个能自举的 rootfs。
-    req = [n for n, d in pkgs.items() if d.get('Priority') == 'required']
-    seeds = [s.strip() for s in seedstr.split(',') if s.strip()]
-    print("  索引 %d 个包（含 %d 个 Priority:required）" % (len(pkgs), len(req)))
+    # 自动种子按构建器选：mmdebstrap variant=essential 装的是 Essential:yes
+    # 集合，debootstrap 阶段一装的才是 Priority:required。默认种 Essential ——
+    # required 是过度近似，而且厂商会乱标：方德把 425 MB 的 360 浏览器标成
+    # Priority:required，按 required 播种就把它整个背进闭包。
+    # debootstrap 类流程（selfhost）传 --with-required 显式打开。
+    auto = [n for n, d in pkgs.items() if d.get('Essential') == 'yes']
+    kind = 'Essential:yes'
+    if '--with-required' in sys.argv:
+        auto = sorted(set(auto) | {n for n, d in pkgs.items() if d.get('Priority') == 'required'})
+        kind = 'Essential:yes ∪ Priority:required'
+    req = auto
+    seeds = [s.strip() for s in seedstr.split(",") if s.strip()]
+    print("  索引 %d 个包（自动种子 %d 个：%s）" % (len(pkgs), len(req), kind))
 
     keep, missing, queue = set(), set(), list(dict.fromkeys(req + seeds))
     for s in queue:
@@ -100,9 +166,9 @@ def main():
     if missing:
         print("  介质里缺 %d 个（多为虚拟/可选）: %s" %
               (len(missing), ', '.join(sorted(missing)[:8])))
-    with open(os.path.join('/tmp/fdla', 'lx.closure'), 'w') as f:
+    with open(outfile, 'w') as f:
         for n in sorted(keep):
             f.write("%s\t%s\n" % (n, pkgs[n].get('Filename', '')))
-    print("  清单已写 /tmp/fdla/lx.closure")
+    print("  清单已写 %s" % outfile)
 
 main()

@@ -108,6 +108,13 @@ elif [ "$(cat "$ROOT_HOST/work/$DID-stage/.foreign-done" 2>/dev/null)" != "$STAG
     mkdir -p $STAGE/usr/sbin
     printf '#!/bin/sh\\nexit 101\\n' > $STAGE/usr/sbin/policy-rc.d; chmod 755 $STAGE/usr/sbin/policy-rc.d
     rm -f $STAGE/var/lib/dpkg/lock* 2>/dev/null || true
+      # 有的厂商 maintainer script 假定某些文件已存在（方德的 apt postinst 直接
+      # sed /etc/apt/apt.conf，裸自举时没有它 → exit 2）。conf 用 STAGE1_TOUCH
+      # 列出这类文件，在 stage2 跑 configure 之前预置为空文件。
+      for _tf in ${STAGE1_TOUCH:-}; do
+        mkdir -p $STAGE/\$(dirname \$_tf)
+        : > $STAGE/\$_tf
+      done
     printf '%s' '$STAGE_FP' > $STAGE/.foreign-done
     du -sh $STAGE" || exit 1
 fi

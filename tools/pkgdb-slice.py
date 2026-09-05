@@ -162,6 +162,9 @@ def main():
             sp = os.path.join(src, idf)
             if os.path.isfile(sp):
                 os.makedirs(os.path.join(out, 'etc'), exist_ok=True)
-                shutil.copy2(sp, os.path.join(out, idf))
+                dp = os.path.join(out, idf)
+                if os.path.exists(dp):
+                    os.unlink(dp)     # 包文件先落了一份只读副本，覆盖前先删
+                shutil.copy2(sp, dp)
 
 main()

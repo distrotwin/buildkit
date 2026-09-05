@@ -83,9 +83,9 @@ ghcr.io/distrotwin/scratch:<介质标识>
 
 ## 谁造、什么时候造
 
-**本机造，手工触发，不进 CI**——只有本机能取材，放进 CI 没有意义。介质不变就不需要重造。工具是 `tools/srcdata-make.sh`（打包、推送、拉回验 digest、打印要钉进 conf 的 manifest 指纹），runner 侧对应 `tools/srcdata-fetch.sh`（拉取、两道 manifest 门禁、展示 `.origin`）。
+**切料在本机，首次发布走 workflow 转推。** 只有本机能取材，切料（算闭包、下载、验 SHA256、生成 `.origin`/`.manifest`）都在本机做；但 **package 的第一次创建必须由 workflow 用 `GITHUB_TOKEN` 推**——GHCR 包的可见性没有 API，本机 PAT 首推的包落成 internal（计费等同 private，占 500 MB 免费配额且超额阻断），而 workflow 首推的包继承仓库可见性，public 仓库推出来就是 public（实测判据：`probe-pkg-visibility` 读回 `visibility: public`）。流程：本机把切好的目录打成 `src/` 前缀的 tar.zst 传 release asset → 触发 `srcdata-publish.yml`（导入、验 manifest 指纹、推送、断言可见性 public）→ 删中转 release。
 
-本机那个 `gh` token 通常只有 `read:packages`／`delete:packages`，推之前需要 `gh auth refresh -s write:packages` 或另给一个 PAT。首次推出的 package 记得设为 public。
+package 已是 public 之后，追加新 tag 可以直接用本机 `tools/srcdata-make.sh`（打包、推送、拉回验 manifest、打印要钉进 conf 的指纹），本机 token 需要 `write:packages`。runner 侧取材对应 `tools/srcdata-fetch.sh`（拉取、两道 manifest 门禁、展示 `.origin`）。
 
 ## runner 侧怎么接
 

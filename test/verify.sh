@@ -168,6 +168,9 @@ for DID in $DISTROS; do
     [ -z "$(printf '%s' "$ghost" | tr -d ' ')" ] \
       && pass "ghost_pkgs（库里无已删文件的内核包）" \
       || fail "ghost_pkgs: 库里登记为已装、抽样文件全部缺失的包:$ghost（删文件的那一处应同时清库登记，见 lib/common.sh）"
+    if [ "${FAMILY:-deb}" = raw ]; then
+      pass "copyright 按族跳过（raw：pkgutils 无 doc 元数据约定，doc 树在取材期整体裁剪并已记录）"
+    else
     check copyright_kept Y "$(g copyright_kept)"
     # 逐包 copyright：厂商本来就没打的列入白名单；白名单外缺失即失败 —— 精简策略
     # 写错时只要还剩一个包有 copyright，旧的 copyright_kept 就永真，抓不住。
@@ -183,6 +186,7 @@ for DID in $DISTROS; do
       | grep -vxE 'libboundscheck|libcryptsetup12|openssl|linx-archive-keyring|glib2' | tr '\n' ' ')
     [ -z "$cpmiss" ] && pass "copyright 逐包（白名单外无缺失）" \
       || fail "copyright 白名单外缺失: $cpmiss"
+    fi
     # ld.so.cache 必须存在且非空。切片路径与 --noscripts 的 rpm bootstrap 都会漏它，
     # 而漏掉的表现是「某些二进制起不来」而非任何构建期报错。
     [ "$(g ldcache)" -gt 1000 ] 2>/dev/null \
@@ -193,7 +197,8 @@ for DID in $DISTROS; do
       Y|n/a) pass "systemctl_runs $(g systemctl_runs)" ;;
       *) fail "systemctl_runs: 期望 Y 或 n/a，实际 $(g systemctl_runs)（私有库路径没进 ld.so.cache？）" ;;
     esac
-    check policy_rcd Y "$(g policy_rcd)"
+    if [ "${FAMILY:-deb}" = raw ]; then :   # raw 无任何 rc 体系
+    else check policy_rcd Y "$(g policy_rcd)"; fi
     # L1 完整性
     check audit 0 "$(g audit)"
     # 坏 ELF 按**文件名**白名单，不按数量放宽：允许「1 个」会对任何新增的坏 ELF
@@ -220,14 +225,22 @@ for DID in $DISTROS; do
     # 名字的判据把一个完全正确的时区判成了失败。
     # 这是尺子的校准问题而不是被试的缺陷——接入比原有被试更老的系统时，
     # 先问「量的是尺子还是被试」。
+    if [ "${FAMILY:-deb}" = raw ]; then
+      pass "localtime 按族跳过（raw：无 zoneinfo 库可比对，介质原样保留）"
+    else
     case "$(g localtime)" in
       UTC|UCT|Zulu|Universal|Greenwich|Etc/UTC|Etc/UCT|Etc/Zulu|Etc/Universal|Etc/Greenwich)
         pass "localtime $(g localtime)" ;;
       *) fail "localtime: 期望 UTC 或其 IANA 别名，实际 $(g localtime)" ;;
     esac
+    fi
+    if [ "${FAMILY:-deb}" = raw ]; then
+      pass "machine_id/dpkg_list 按族跳过（raw：无 systemd、无 dpkg）"
+    else
     # machine-id 必须存在且为空（systemd 的 first-boot 语义）——report.md §7（验收） 列了却一直没接线
     check machine_id_empty Y "$(g machine_id_empty)"
     check dpkg_list_ok Y "$(g dpkg_list_ok)"
+    fi
     # 哨兵：检查集必须跑到最后一行，否则前面所有"通过"都不可信
     check checks_complete Y "$(g checks_complete)"
     # 悬空软链：厂商自带/切片残留的几条是已知且惰性的，不删（删了就动了"等价环境"）；
@@ -240,8 +253,9 @@ for DID in $DISTROS; do
     [ -z "$unexpected" ] && pass "dangling_etc 仅已知项" \
       || fail "dangling_etc 出现清单外悬空软链: $unexpected"
     # 包数下限：status 断链时 dpkg-query 输出 0 行且退出码 0（历史假通过的机制本身）
-    [ "$(g pkgs)" -ge 40 ] 2>/dev/null \
-      && pass "pkgs $(g pkgs)" || fail "pkgs: 期望 >=40 实际 $(g pkgs)"
+    _pkgfloor=40; [ "${FAMILY:-deb}" = raw ] && _pkgfloor=20   # 磐石 micro 实测 30 包
+    [ "$(g pkgs)" -ge "$_pkgfloor" ] 2>/dev/null \
+      && pass "pkgs $(g pkgs)" || fail "pkgs: 期望 >=$_pkgfloor 实际 $(g pkgs)"
     # os-release 必须有 ID/VERSION_ID（不能是 ?/?）
     oid=$(g os_id)
     if [ "$oid" = "?/?" ] || [ -z "$oid" ]; then
@@ -260,19 +274,36 @@ for DID in $DISTROS; do
     # rpm 侧 glibc-all-langpacks 是一个整包，装了就带 zh_CN 的四个变体
     # （zh_CN、zh_CN.utf8、zh_CN.gb18030、zh_CN.gbk），拆不开。所以期望值按族取：
     # 判据要守的是「zh_CN 可用」，不是「恰好一个变体」。
-    if [ "${FAMILY:-deb}" = rpm ]; then
+    if [ "${FAMILY:-deb}" = raw ]; then
+      # raw 族（磐石）：locale 由 glibc 自带、取材保留 zh_CN 多变体；无
+      # ca-certificates 包。这两项按族改判据（量的是尺子不是被试）。
+      [ "$(g locale_zh)" -ge 1 ] 2>/dev/null \
+        && pass "locale_zh $(g locale_zh)（raw：glibc 自带多变体）" \
+        || fail "locale_zh: 期望 >=1 实际 $(g locale_zh)"
+    elif [ "${FAMILY:-deb}" = rpm ]; then
       [ "$(g locale_zh)" -ge 1 ] 2>/dev/null \
         && pass "locale_zh $(g locale_zh)（rpm 系整包提供多个变体）" \
         || fail "locale_zh: 期望 >=1 实际 $(g locale_zh)"
     else
       check locale_zh 1 "$(g locale_zh)"
     fi
-    if [ "$(g ca_bytes)" -gt 100000 ]; then PASS=$((PASS+1))
+    if [ "${FAMILY:-deb}" = raw ]; then pass "ca_bytes 按族跳过（raw：该世代无 ca-certificates 包）"
+    elif [ "$(g ca_bytes)" -gt 100000 ]; then PASS=$((PASS+1))
     else FAIL=$((FAIL+1)); PROBLEMS+=("  ✗ $IMG ca_bytes: $(g ca_bytes) 过小"); fi
     # 期望按**包管理系**分支。rpm 系没有 apt，拿 apt 的判据去量会在 has_apt /
     # apt_check / apt_roundtrip 上一片失败 —— 量的是尺子不是被试（与能力探针同一个
     # 错，见 report §6.1）。deb 侧保留原有逻辑，它已针对 UOS 的 OSTree 分发调校过。
-    if [ "${FAMILY:-deb}" = rpm ]; then
+    if [ "${FAMILY:-deb}" = raw ]; then
+      # raw 族无 apt/dnf：三档都不带在线包管理；base/devel 仍验 python3 与编译面
+      case $TIER in
+        micro) check has_pkgmgr N "$(g has_pkgmgr)" ;;
+        base)  check has_pkgmgr N "$(g has_pkgmgr)"; check has_python3 Y "$(g has_python3)" ;;
+        devel) check has_pkgmgr N "$(g has_pkgmgr)"
+               check has_cc Y "$(g has_cc)"; check has_make Y "$(g has_make)"
+               check compile_c Y "$(g compile_c)"
+               check has_cxx Y "$(g has_cxx)"; check compile_cxx Y "$(g compile_cxx)" ;;
+      esac
+    elif [ "${FAMILY:-deb}" = rpm ]; then
       case $TIER in
         micro) check has_pkgmgr N "$(g has_pkgmgr)" ;;
         base)  check has_pkgmgr Y "$(g has_pkgmgr)"; check has_python3 Y "$(g has_python3)"; check tls Y "$(g tls)"

@@ -80,12 +80,12 @@ def main():
         return False
 
     if mode == 'tier':
-        # media 已带 .pkgmap（media 期算好的 包→文件），只做确定性拷贝
+        # media 已带 .pkgmap（media 期算好的 包→版本→文件），只做确定性拷贝
         pkgs = {}
         for blk in open(os.path.join(src, '.pkgmap'), encoding='utf-8').read().split('\n\n'):
             lines = [l for l in blk.split('\n') if l]
-            if lines:
-                pkgs[lines[0]] = ('-', lines[1:])
+            if len(lines) >= 2:
+                pkgs[lines[0]] = (lines[1], lines[2:])
     else:
         pkgs = load_db(os.path.join(src, 'var/lib/pkg/db'))
 
@@ -146,13 +146,20 @@ def main():
         for name in sorted(keep):
             ver = (srcdb or pkgs)[name][0] if mode == 'media' else pkgs[name][0]
             files = pkgs[name][1]
-            f.write(name + '\n' + (ver if ver != '-' else '0') + '\n')
+            f.write(name + '\n' + ver + '\n')
             f.write('\n'.join(p.lstrip('/') for p in files) + '\n\n')
 
     if mode == 'media':
         with open(os.path.join(out, '.pkgmap'), 'w') as f:
             for name in sorted(keep):
                 kept = [p for p in pkgs[name][1] if not pruned(p)]
-                f.write(name + '\n' + '\n'.join(kept) + '\n\n')
+                f.write(name + '\n' + pkgs[name][0] + '\n' + '\n'.join(kept) + '\n\n')
+        # 身份文件必须随介质走：pkg db 不登记 /etc/linx-release，但下游要拿它
+        # 合成 os-release
+        for idf in ('etc/linx-release', 'etc/issue'):
+            sp = os.path.join(src, idf)
+            if os.path.isfile(sp):
+                os.makedirs(os.path.join(out, 'etc'), exist_ok=True)
+                shutil.copy2(sp, os.path.join(out, idf))
 
 main()

@@ -448,7 +448,10 @@ build_rpmmedia() {
   local D="$ROOT/work/$DID-$TIER"
   rm -rf "$D"; mkdir -p "$D"
   log "[$DID/$TIER] rpmmedia 从介质仓库装包"
-  RPM_DB_BACKEND="${RPM_DB_BACKEND:-}" \
+  # RPM_DB_VIA_TARGET 此前只在 rpmrepo 路传过（kylinsec），rpmmedia 路漏传 ——
+  # 症状是 an7 的 via-target 分支整个没走、最后 rpm -qa 读 0。两条路共用装法，
+  # 环境也必须一致。
+  RPM_DB_BACKEND="${RPM_DB_BACKEND:-}" RPM_DB_VIA_TARGET="${RPM_DB_VIA_TARGET:-}" \
     python3 "$BK/tools/rpmmedia.py" "$MEDIA" "$D" "$seeds" || die "[$DID/$TIER] rpmmedia 失败"
   # adapt_container 的签名是 (rootfs, sources.list 内容, distro-id)。
   # rpm 系没有 apt sources.list，第二个参数传空 —— 那段逻辑里的 `if [ -n "$SRCLIST" ]`

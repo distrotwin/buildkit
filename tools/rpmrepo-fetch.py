@@ -344,6 +344,12 @@ def main():
                     print("    " + b.split(":", 1)[0].strip())
                 sys.exit("有 rpm 未通过厂商公钥验签且不在 UNSIGNED_OK，拒绝继续")
         print("  %d 个 rpm 全部通过厂商公钥验签" % len(names))
+    elif os.environ.get("NO_RPM_SIG") == "iso-anchored":
+        # 有的 ISO 介质整盘未签名（凝思 6.0.99 el24.03 实测 198/213 无签名行）。
+        # 这不是「跳过验签」而是信任根不同：介质完整性由 ISO 官方校验和 +
+        # repodata 逐包 sha256 锚定，与 deb 侧 NO_CHECK_GPG 介质同性质。
+        # 必须显式声明才走到这里，且上层 .origin 必须记录锚点性质。
+        print("  介质声明为 ISO 锚定（NO_RPM_SIG=iso-anchored），不做逐包 GPG 验签")
     else:
         sys.exit("未提供 KEYFILE，拒绝在无信任根的情况下产出镜像")
 

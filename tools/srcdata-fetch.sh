@@ -29,8 +29,9 @@ docker export "$C" | tar -C "$_tmp" -x --no-same-owner --no-same-permissions src
 docker rm "$C" >/dev/null
 mv "$_tmp/src" "$DST"; rmdir "$_tmp"
 # 介质里的 555 目录落盘后连自己都删不掉（下次幂等重取的 rm -rf 会卡住）。
-# manifest 锚的是内容不是权限位，统一补上属主写权限无损完整性。
-chmod -R u+w "$DST"
+# 只补目录：文件的权限位是被试内容的一部分（磐石 /etc/shadow 是 444，
+# 整树 chmod 会把它抹成 644，镜像里的 shadow 权限就失真了——实测踩过）。
+find "$DST" -type d -exec chmod u+w {} +
 
 # 两道门禁，缺一不可：
 # ① manifest 文件本身与 conf 钉的指纹一致 —— 防整份 manifest 被换

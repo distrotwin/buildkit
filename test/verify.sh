@@ -307,8 +307,17 @@ for DID in $DISTROS; do
       case $TIER in
         micro) check has_pkgmgr N "$(g has_pkgmgr)" ;;
         base)  check has_pkgmgr Y "$(g has_pkgmgr)"; check has_python3 Y "$(g has_python3)"; check tls Y "$(g tls)"
-               check has_source Y "$(g has_source)"
-               check pkg_roundtrip Y "$(g pkg_roundtrip)"
+               # 在线源期望按 conf 开关：rpmrepo 路（kylinsec）出厂带可用源，
+               # rpmmedia 路（凝思 an7/an8/el24.03）取材自 ISO、厂商无可达在线
+               # 源，出厂源清空 —— 与 deb 介质档同规。EXPECT_OS_REPO=no 时
+               # has_source/roundtrip 的合格值就是 N/nosrc。
+               if [ "${EXPECT_OS_REPO:-yes}" = no ]; then
+                 check has_source N "$(g has_source)"
+                 check pkg_roundtrip nosrc "$(g pkg_roundtrip)"
+               else
+                 check has_source Y "$(g has_source)"
+                 check pkg_roundtrip Y "$(g pkg_roundtrip)"
+               fi
                # rpm 侧的「装完仍自洽」对应 rpm -Va 的未满足依赖数（inner-checks 已按族分支）
                check audit_after 0 "$(g audit_after)" ;;
         devel) check has_pkgmgr Y "$(g has_pkgmgr)"

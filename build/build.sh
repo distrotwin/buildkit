@@ -453,6 +453,13 @@ build_rpmmedia() {
   # 环境也必须一致。
   RPM_DB_BACKEND="${RPM_DB_BACKEND:-}" RPM_DB_VIA_TARGET="${RPM_DB_VIA_TARGET:-}" \
     python3 "$BK/tools/rpmmedia.py" "$MEDIA" "$D" "$seeds" || die "[$DID/$TIER] rpmmedia 失败"
+  # 出厂源与 deb 介质档同规：构建期源是本地介质，厂商包自带的 repo 文件
+  # （openEuler.repo 等）指向对 CI/用户都未必可达的网络源，留着会让镜像里
+  # dnf 一开口就撞网络。整目录移除并记录；EXPECT_OS_REPO=no 与之配套。
+  if ls "$D"/etc/yum.repos.d/*.repo >/dev/null 2>&1; then
+    log "[$DID/$TIER] 清空出厂 yum 源（$(ls "$D"/etc/yum.repos.d/*.repo | wc -l) 个厂商 repo 文件，介质档不带在线源）"
+    rm -f "$D"/etc/yum.repos.d/*.repo
+  fi
   # adapt_container 的签名是 (rootfs, sources.list 内容, distro-id)。
   # rpm 系没有 apt sources.list，第二个参数传空 —— 那段逻辑里的 `if [ -n "$SRCLIST" ]`
   # 会正确走到「micro 档写空文件」那一支，不会留下 bootstrap 期的宿主路径。

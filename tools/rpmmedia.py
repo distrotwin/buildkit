@@ -355,6 +355,24 @@ def main():
                 print("    alternatives 链接就绪：%s" % " ".join(sorted(set(_links))))
 
 
+        # 同因（--noscripts）：EL 系的 locale-archive 是 %post/%posttrans 现场
+        # 构建的（glibc-common 带 build-locale-archive + tmpl；EL8 的
+        # all-langpacks 用 lua 把 tmpl 挪成正档）。跳过后 archive 是空壳，
+        # locale -a 连 zh_CN 都列不出。判据挂在结果上：重放后 archive 必须非空。
+        _la = os.path.join(dst, "usr/lib/locale/locale-archive")
+        _lat = _la + ".tmpl"
+        _bla = os.path.join(dst, "usr/sbin/build-locale-archive")
+        if os.path.exists(_lat) and (not os.path.exists(_la) or os.path.getsize(_la) < 4096):
+            print("补建 locale-archive（--noscripts 跳过的 %post）…")
+            if os.path.exists(_bla):
+                subprocess.run(["chroot", os.path.abspath(dst), "/usr/sbin/build-locale-archive"],
+                               capture_output=True, text=True, timeout=300)
+            else:
+                shutil.copy2(_lat, _la)
+            if not (os.path.exists(_la) and os.path.getsize(_la) >= 4096):
+                sys.exit("locale-archive 重放后仍为空，镜像内 locale -a 会一个都列不出")
+            print("    locale-archive 就绪：%d 字节" % os.path.getsize(_la))
+
         # 与 update-ca-trust 同因：crypto-policies 的 %post 会把
         # /usr/share/crypto-policies/<策略>/ 里的模板展开到 /etc/crypto-policies/back-ends/。
         # --noscripts 跳过它之后那个目录是空的，于是 /etc/krb5.conf.d/crypto-policies

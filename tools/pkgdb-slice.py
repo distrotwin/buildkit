@@ -156,7 +156,9 @@ def main():
                 f.write(name + '\n' + pkgs[name][0] + '\n' + '\n'.join(kept) + '\n\n')
         # 身份文件必须随介质走：pkg db 不登记 /etc/linx-release，但下游要拿它
         # 合成 os-release
-        for idf in ('etc/linx-release', 'etc/issue'):
+        for idf in ('etc/linx-release', 'etc/issue',
+                    'etc/passwd', 'etc/group', 'etc/shadow', 'etc/gshadow',
+                    'etc/nsswitch.conf', 'etc/login.defs', 'etc/profile'):
             sp = os.path.join(src, idf)
             if os.path.isfile(sp):
                 os.makedirs(os.path.join(out, 'etc'), exist_ok=True)

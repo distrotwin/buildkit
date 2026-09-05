@@ -339,6 +339,9 @@ def main():
             for b in bad[:10]:
                 print("    %s%s" % (b, "" if b in hard else "（放行）"))
             if hard:
+                print("  未放行明细（%d 个）：" % len(hard))
+                for b in hard:
+                    print("    " + b.split(":", 1)[0].strip())
                 sys.exit("有 rpm 未通过厂商公钥验签且不在 UNSIGNED_OK，拒绝继续")
         print("  %d 个 rpm 全部通过厂商公钥验签" % len(names))
     else:

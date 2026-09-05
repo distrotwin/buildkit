@@ -125,3 +125,19 @@ deb 侧算闭包要注意两件事，都会让结果偏小到不可用：
 **`Priority: required` 必须并进种子。** `debootstrap` 阶段一装的就是这一批（凝思有 73 个），漏了它闭包看着能算完，装出来的 rootfs 起不来。
 
 **or 依赖（`a | b`）不能只看第一个候选。** 介质里可能只带了第二个，只认第一个会误判成缺失。要在候选里挑第一个真的在索引里的。
+
+## 接凝思与方德时踩过的坑（都会在别的厂商身上重演）
+
+**厂商 dpkg 的 IMA 标签在 rootless 容器里必炸。** 方德的 dpkg 给 maintainer script 设 `security.ima` xattr，rootless docker 里 setxattr 直接 `Operation not permitted`，报错文案是吓人的 `internal error: set ima label failed! core dumped`。rootful（CI runner 的 sudo / --privileged 容器）没这个问题。所以这类系统的本机预演要么用宿主 sudo，要么接受只有 CI 能验。
+
+**厂商会自造依赖环。** 方德给 libcrypt1 加了 libssl1.1 依赖，形成 `libssl1.1→debconf→perl-base→libcrypt1` 的环：apt 的 immediate-configure 拆不开（关掉 `APT::Immediate-Configure` 也一样，换个报错而已），dpkg 能拆。症状是 mmdebstrap 报 `Could not configure 'libssl1.1'`，看着像包坏了。判据：mmdebstrap 系（debmedia）走不通的厂商，换 selfhost（debootstrap 两阶段）再试一次，别直接判死。
+
+**厂商 maintainer script 会假定文件已存在。** 方德 apt 的 postinst 直接 `sed /etc/apt/apt.conf`，裸自举时没有这个文件 → exit 2。selfhost 的 `STAGE1_TOUCH` 就是为这类假定准备的：stage2 之前把 conf 列出的路径预置为空文件。
+
+**厂商的 suite 代号会踩 debootstrap 的年代分支。** 方德把 codename 叫 `base`，不在 debootstrap 的 buster/bullseye 白名单里，被当成 bookworm+ 而强求 `usr-is-merged` 包（bullseye 没有这个包）。介质是我们生成的，把代号改记成对应的 Debian 代号即可，改名依据写进 `.origin`。
+
+**厂商的 dpkg 钩子会挂死构建。** 凝思的 `linx-noroot-conf` 装 `exec-after-dpkg.sh`（三权分立管理），容器里这些钩子 13 分钟不退出、dpkg 变僵尸。`PIN_NEVER` 从 debootstrap 入口拦，不要事后 purge（会弄坏依赖图）。
+
+**`Priority: required` 是厂商可乱标的档位。** 方德把 425 MB 的 360 浏览器标成 required。所以 deb-closure 默认种 `Essential:yes`（mmdebstrap 装的就是它），debootstrap 类流程用 `--with-required` 显式打开并配 `PIN_NEVER` 拦垃圾。
+
+**GHCR package 的可见性没有 API。** REST 与 GraphQL 都改不了，只能网页操作（package settings → Danger Zone）。所以 srcdata 取材步先 `docker login`：public 时无害，internal/private 时是唯一可用路径。计费上 internal 等同 private（占 500 MB 免费配额），转 public 前多推几份介质就会顶满。

@@ -137,6 +137,9 @@ jobs:
           set -eu
           IMG=$(buildkit/tools/conf-get.sh '${{ inputs.distro-id }}' SRCDATA_IMAGE)
           if [ -n "$IMG" ]; then
+            # 登录后再拉：public 包不需要，但 package 尚未转 public 时（REST 改不了
+            # 可见性，只能网页操作）GITHUB_TOKEN 认证拉取照样可用，两种状态都覆盖。
+            echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin >/dev/null
             ROOT="$ROOT" buildkit/tools/srcdata-fetch.sh '${{ inputs.distro-id }}'
           else
             echo "${{ inputs.distro-id }} 无 SRCDATA_IMAGE，跳过"

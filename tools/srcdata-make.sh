@@ -15,12 +15,10 @@ IMG="ghcr.io/distrotwin/scratch:$TAG"
 N=$(wc -l < "$DIR/.manifest")
 PIN=$(sha256sum "$DIR/.manifest" | cut -d' ' -f1)
 
-CTX=$(mktemp -d)
-trap 'rm -rf "$CTX"' EXIT
-printf 'FROM scratch\nCOPY src /src\n' > "$CTX/Dockerfile"
-# 硬链接省一份磁盘拷贝；跨设备时退回 cp
-cp -al "$DIR" "$CTX/src" 2>/dev/null || cp -a "$DIR" "$CTX/src"
-docker build -q -f "$CTX/Dockerfile" -t "$IMG" "$CTX" >/dev/null
+# tar 直灌 docker import：不落第二份磁盘拷贝，也绕开 ISO 拷出文件只读
+# 导致的清理失败（cp -al 跨设备还会静默退化成嵌套拷贝，实测踩过）。
+tar --numeric-owner --owner=0 --group=0 -C "$DIR" \
+    --transform 's,^\./,src/,' -cf - . | docker import - "$IMG" >/dev/null
 docker push -q "$IMG" >/dev/null
 
 # 推完立刻拉回校验：digest 一致才算发布成功，不拿「push 没报错」当判据
